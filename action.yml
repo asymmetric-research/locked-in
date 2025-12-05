@@ -1,6 +1,6 @@
 name: 'Lockfile Guard'
 description: 'Lints for improper JS package manager usage (npm, pnpm, yarn, bun) to enforce supply chain security'
-author: 'John Saigle'
+author: 'Asymmetric Research'
 
 branding:
   icon: 'shield'
@@ -21,7 +21,7 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         # Repository where lockfile-guard is published
-        LOCKFILE_GUARD_REPO="johnsaigle/lockfile-guard"
+        LOCKFILE_GUARD_REPO="asymmetric-research/lockfile-guard"
         
         # Determine which commit to use
         COMMIT="${{ inputs.commit }}"

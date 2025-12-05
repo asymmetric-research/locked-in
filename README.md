@@ -44,13 +44,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: johnsaigle/lockfile-guard@main
+      - uses: asymmetric-research/lockfile-guard@main
 ```
 
 To pin to a specific commit:
 
 ```yaml
-      - uses: johnsaigle/lockfile-guard@main
+      - uses: asymmetric-research/lockfile-guard@main
         with:
           commit: abc123f  # specific commit SHA
 ```
@@ -59,7 +59,7 @@ To pin to a specific commit:
 
 ```bash
 # Install
-cargo install --git https://github.com/johnsaigle/lockfile-guard
+cargo install --git https://github.com/asymmetric-research/lockfile-guard
 
 # Run
 lockfile-guard
