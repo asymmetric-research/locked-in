@@ -59,14 +59,16 @@ fn collect_gitignores() -> Vec<(PathBuf, Gitignore)> {
         .filter_map(Result::ok)
     {
         let path = entry.path();
-        if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(".gitignore")
-            && let Some(parent) = path.parent() {
+        if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(".gitignore") {
+            if let Some(parent) = path.parent() {
                 let mut builder = GitignoreBuilder::new(parent);
-                if builder.add(path).is_none()
-                    && let Ok(gitignore) = builder.build() {
+                if builder.add(path).is_none() {
+                    if let Ok(gitignore) = builder.build() {
                         gitignores.push((parent.to_path_buf(), gitignore));
                     }
+                }
             }
+        }
     }
 
     gitignores
@@ -422,5 +424,189 @@ mod tests {
     fn test_comment_skipped() {
         assert!(is_comment_or_placeholder("# npm install"));
         assert!(is_comment_or_placeholder("npm install <package>"));
+    }
+
+    // ===== Scoped Package Tests =====
+    // Reference: https://docs.npmjs.com/cli/v10/commands/npm-install
+    // Scoped packages use @scope/package format where @ is part of the scope, not the version
+    
+    #[test]
+    fn test_npm_scoped_package_without_version_violation() {
+        // Should flag @types/node without version
+        let violations = check_npm("npm i @types/node", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_npm_scoped_package_with_version_allowed() {
+        // Should allow @types/node@18.0.0
+        let violations = check_npm("npm i @types/node@18.0.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_npm_scoped_org_package_without_version_violation() {
+        // Should flag @myorg/privatepackage without version
+        let violations = check_npm("npm install @myorg/privatepackage", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_npm_scoped_org_package_with_version_allowed() {
+        // Should allow @myorg/privatepackage@1.5.0
+        let violations = check_npm("npm install @myorg/privatepackage@1.5.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    // ===== Full Semver Version Tests =====
+    // Reference: https://docs.npmjs.com/cli/v10/commands/npm-install
+    // npm supports full semver: major.minor.patch (e.g., 1.2.3)
+    
+    #[test]
+    fn test_npm_full_semver_allowed() {
+        // Should allow package@1.2.3
+        let violations = check_npm("npm i eslint@8.50.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_npm_short_semver_allowed() {
+        // Should allow package@1.2 (current regex matches this)
+        let violations = check_npm("npm i package@1.2", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    // ===== npm ci Tests =====
+    // Reference: https://docs.npmjs.com/cli/v10/commands/npm-ci
+    // npm ci can only install entire projects; individual dependencies cannot be added
+    
+    #[test]
+    fn test_npm_ci_bare_allowed() {
+        // npm ci with no arguments is allowed
+        let violations = check_npm("npm ci", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    // ===== Dev Dependency Flags Tests =====
+    // Reference: https://docs.npmjs.com/cli/v10/commands/npm-install
+    // -D, --save-dev flags should still require version pins
+    
+    #[test]
+    fn test_npm_dev_flag_without_version_violation() {
+        // Should flag npm i -D eslint
+        let violations = check_npm("npm i -D eslint", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_npm_dev_flag_with_version_allowed() {
+        // Should allow npm i -D eslint@8.0.0
+        let violations = check_npm("npm i -D eslint@8.50.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_npm_save_dev_flag_without_version_violation() {
+        // Should flag npm install --save-dev typescript
+        let violations = check_npm("npm install --save-dev typescript", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_npm_save_dev_flag_with_version_allowed() {
+        // Should allow npm install --save-dev typescript@5.0.0
+        let violations = check_npm("npm install --save-dev typescript@5.0.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    // ===== pnpm Tests =====
+    // Reference: https://pnpm.io/cli/add
+    
+    #[test]
+    fn test_pnpm_scoped_package_without_version_violation() {
+        let violations = check_pnpm("pnpm add @types/react", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_pnpm_scoped_package_with_version_allowed() {
+        let violations = check_pnpm("pnpm add @types/react@18.0.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_pnpm_dev_flag_without_version_violation() {
+        let violations = check_pnpm("pnpm add -D vitest", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_pnpm_dev_flag_with_version_allowed() {
+        let violations = check_pnpm("pnpm add -D vitest@1.0.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    // ===== yarn Tests =====
+    // Reference: https://yarnpkg.com/cli/add
+    
+    #[test]
+    fn test_yarn_scoped_package_without_version_violation() {
+        let violations = check_yarn("yarn add @babel/core", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_yarn_scoped_package_with_version_allowed() {
+        let violations = check_yarn("yarn add @babel/core@7.22.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_yarn_dev_flag_without_version_violation() {
+        let violations = check_yarn("yarn add -D jest", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_yarn_dev_flag_with_version_allowed() {
+        let violations = check_yarn("yarn add -D jest@29.0.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    // ===== bun Tests =====
+    // Reference: https://bun.sh/package-manager
+    
+    #[test]
+    fn test_bun_scoped_package_without_version_violation() {
+        let violations = check_bun("bun add @hono/hono", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_bun_scoped_package_with_version_allowed() {
+        let violations = check_bun("bun add @hono/hono@4.0.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_bun_dev_flag_without_version_violation() {
+        let violations = check_bun("bun add -D prettier", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_bun_dev_flag_with_version_allowed() {
+        let violations = check_bun("bun add -D prettier@3.0.0", 1);
+        assert_eq!(violations.len(), 0);
     }
 }
