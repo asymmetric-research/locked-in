@@ -9,8 +9,24 @@ walkdir = "2.4"
 colored = "2.1"
 ignore = "0.4"
 
+[profile.dev]
+overflow-checks = true
+lto = "fat"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+opt-level = 3
+strip = "debuginfo"
+incremental = true
+
 [lints.clippy]
+complexity = "warn"
+correctness = "warn"
+nursery = "warn"
 pedantic = "warn"
+perf = "warn"
+suspicious = "warn"
 # ==== Security-related clippy lints
 arithmetic_side_effects = "warn"
 as_conversions = "warn"
