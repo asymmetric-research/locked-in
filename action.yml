@@ -19,15 +19,24 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        INPUT_COMMIT: ${{ inputs.commit }}
       run: |
         # Repository where lockfile-guard is published
         LOCKFILE_GUARD_REPO="asymmetric-research/lockfile-guard"
-        
+
         # Determine which commit to use
-        COMMIT="${{ inputs.commit }}"
+        COMMIT="${INPUT_COMMIT}"
+        if [ -n "$COMMIT" ] && ! [[ "$COMMIT" =~ ^[a-fA-F0-9]{40}$ ]]; then
+          echo "Error: Invalid commit SHA format (must be 40 hex characters)"
+          exit 1
+        fi
+        
         if [ -z "$COMMIT" ]; then
           echo "No commit specified, fetching latest from main branch..."
-          COMMIT=$(curl -s "https://api.github.com/repos/${LOCKFILE_GUARD_REPO}/commits/main" | grep '"sha"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          COMMIT=$(gh api "repos/${LOCKFILE_GUARD_REPO}/commits/main" --jq '.sha') || {
+            echo "Error: Failed to fetch latest commit"
+            exit 1
+          }
         fi
         
         echo "Using lockfile-guard from commit: ${COMMIT}"
