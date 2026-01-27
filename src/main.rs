@@ -59,16 +59,14 @@ fn collect_gitignores() -> Vec<(PathBuf, Gitignore)> {
         .filter_map(Result::ok)
     {
         let path = entry.path();
-        if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(".gitignore") {
-            if let Some(parent) = path.parent() {
+        if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(".gitignore")
+            && let Some(parent) = path.parent() {
                 let mut builder = GitignoreBuilder::new(parent);
-                if builder.add(path).is_none() {
-                    if let Ok(gitignore) = builder.build() {
+                if builder.add(path).is_none()
+                    && let Ok(gitignore) = builder.build() {
                         gitignores.push((parent.to_path_buf(), gitignore));
                     }
-                }
             }
-        }
     }
 
     gitignores
