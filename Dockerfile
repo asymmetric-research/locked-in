@@ -24,6 +24,6 @@ RUN apt-get update && \
     apt-get install -y ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/lockfile-guard /usr/local/bin/action
+COPY --from=builder /app/target/release/locked-in /usr/local/bin/action
 
 ENTRYPOINT ["/usr/local/bin/action"]

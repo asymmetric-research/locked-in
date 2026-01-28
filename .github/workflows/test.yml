@@ -23,10 +23,10 @@ jobs:
         run: cargo build --release
 
       - name: Test clean repo passes
-        run: ./target/release/lockfile-guard
+        run: ./target/release/locked-in
 
       - name: Test violations detected
         run: |
           echo "npm install" > test-violations.sh
           echo "pnpm add eslint" >> test-violations.sh
-          ! ./target/release/lockfile-guard
+          ! ./target/release/locked-in

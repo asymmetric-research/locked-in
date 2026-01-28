@@ -1,4 +1,4 @@
-name: Lockfile Guard
+name: locked-in
 
 on:
   push:
@@ -20,8 +20,8 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Build lockfile-guard
+      - name: Build locked-in
         run: cargo build --release --verbose
 
-      - name: Run lockfile-guard
-        run: ./target/release/lockfile-guard
+      - name: Run locked-in
+        run: ./target/release/locked-in

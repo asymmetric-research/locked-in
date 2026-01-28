@@ -25,19 +25,19 @@ jobs:
       - name: Prepare binary
         run: |
           mkdir -p dist
-          cp target/release/lockfile-guard dist/lockfile-guard-linux-x64
-          chmod +x dist/lockfile-guard-linux-x64
+          cp target/release/locked-in dist/locked-in-linux-x64
+          chmod +x dist/locked-in-linux-x64
 
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lockfile-guard-${{ github.sha }}
-          path: dist/lockfile-guard-linux-x64
+          name: locked-in-${{ github.sha }}
+          path: dist/locked-in-linux-x64
           retention-days: 90
 
       - name: Upload binary to latest
         uses: actions/upload-artifact@v4
         with:
-          name: lockfile-guard-latest
-          path: dist/lockfile-guard-linux-x64
+          name: locked-in-latest
+          path: dist/locked-in-linux-x64
           retention-days: 90
