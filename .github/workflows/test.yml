@@ -8,37 +8,25 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-pass:
+  test:
     runs-on: ubuntu-latest
-    name: Test action on clean repo (should pass)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run the linter
-        uses: ./
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
 
-  test-fail:
-    runs-on: ubuntu-latest
-    name: Test action detects violations (should fail)
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Build release binary
+        run: cargo build --release
 
-      - name: Create test file with violations
+      - name: Test clean repo passes
+        run: ./target/release/lockfile-guard
+
+      - name: Test violations detected
         run: |
           echo "npm install" > test-violations.sh
           echo "pnpm add eslint" >> test-violations.sh
-
-      - name: Run the linter (expect failure)
-        uses: ./
-        continue-on-error: true
-        id: lint
-
-      - name: Verify it failed
-        run: |
-          if [ "${{ steps.lint.outcome }}" = "success" ]; then
-            echo "Error: Linter should have failed but passed"
-            exit 1
-          fi
-          echo "✓ Linter correctly detected violations"
+          ! ./target/release/lockfile-guard
