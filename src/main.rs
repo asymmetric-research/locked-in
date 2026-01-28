@@ -59,16 +59,14 @@ fn collect_gitignores() -> Vec<(PathBuf, Gitignore)> {
         .filter_map(Result::ok)
     {
         let path = entry.path();
-        if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(".gitignore") {
-            if let Some(parent) = path.parent() {
+        if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(".gitignore")
+            && let Some(parent) = path.parent() {
                 let mut builder = GitignoreBuilder::new(parent);
-                if builder.add(path).is_none() {
-                    if let Ok(gitignore) = builder.build() {
+                if builder.add(path).is_none()
+                    && let Ok(gitignore) = builder.build() {
                         gitignores.push((parent.to_path_buf(), gitignore));
                     }
-                }
             }
-        }
     }
 
     gitignores
@@ -259,16 +257,14 @@ fn check_pnpm(line: &str, line_num: usize) -> Vec<Violation> {
 
     // Check for pnpm install without --frozen-lockfile
     let pnpm_install_re = Regex::new(r"\bpnpm\s+install\b").unwrap();
-    if pnpm_install_re.is_match(line) {
-        let frozen_lockfile_re = Regex::new(r"--frozen-lockfile").unwrap();
-        if !frozen_lockfile_re.is_match(line) {
+    if pnpm_install_re.is_match(line)
+        && !line.contains("--frozen-lockfile") {
             violations.push(Violation {
                 line_num,
                 message: "Use 'pnpm install --frozen-lockfile' to respect lockfile".to_string(),
                 line_content: line.trim().to_string(),
             });
         }
-    }
 
     // Check for pnpm add without version
     let pnpm_add_re = Regex::new(r"\bpnpm\s+add\s").unwrap();
@@ -325,16 +321,14 @@ fn check_bun(line: &str, line_num: usize) -> Vec<Violation> {
 
     // Check for bun install without --frozen-lockfile
     let bun_install_re = Regex::new(r"\bbun\s+install\b").unwrap();
-    if bun_install_re.is_match(line) {
-        let frozen_lockfile_re = Regex::new(r"--frozen-lockfile").unwrap();
-        if !frozen_lockfile_re.is_match(line) {
+    if bun_install_re.is_match(line)
+        && !line.contains("--frozen-lockfile") {
             violations.push(Violation {
                 line_num,
                 message: "Use 'bun install --frozen-lockfile' to respect lockfile".to_string(),
                 line_content: line.trim().to_string(),
             });
         }
-    }
 
     // Check for bun add without version
     let bun_add_re = Regex::new(r"\bbun\s+add\s").unwrap();
