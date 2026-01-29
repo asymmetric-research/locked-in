@@ -208,11 +208,57 @@ fn is_comment_or_placeholder(line: &str) -> bool {
         || trimmed.starts_with('-')  // Skip markdown list items that are examples
 }
 
+/// Detects which package manager is being used as the command in the line.
+/// Returns the package manager name if detected, or None if no package manager command found.
+/// 
+/// This distinguishes between:
+/// - "npm install -g yarn" -> Some("npm") (npm is the command, yarn is the package)
+/// - "yarn install" -> Some("yarn") (yarn is the command)
+/// - "RUN npm install" -> Some("npm") (handles Dockerfile RUN prefix)
+fn detect_package_manager(line: &str) -> Option<&'static str> {
+    // Pattern matches package manager as a command
+    // Matches after: start of line, whitespace, shell operators, or common prefixes like RUN
+    let pm_command_re = Regex::new(r"\b(npm|pnpm|yarn|bun)\s").unwrap();
+    
+    // Find the first occurrence of a package manager command
+    // We need to ensure it's used as a command, not as a package name
+    if let Some(mat) = pm_command_re.find(line) {
+        let pm_name = &line[mat.start()..mat.end().saturating_sub(1)]; // Exclude trailing space
+        
+        // Check if this is actually being used as a command by looking at what comes before it
+        let before = &line[..mat.start()];
+        
+        // It's a command if:
+        // 1. Nothing before it (start of line), OR
+        // 2. Only whitespace before it, OR  
+        // 3. Common command prefixes (RUN, &&, ;, |, etc.)
+        let is_command = before.is_empty() 
+            || before.chars().all(char::is_whitespace)
+            || before.trim_end().ends_with("RUN")
+            || before.trim_end().ends_with("&&")
+            || before.trim_end().ends_with(';')
+            || before.trim_end().ends_with('|')
+            || before.trim_end().ends_with('&');
+        
+        if is_command {
+            return match pm_name {
+                "npm" => Some("npm"),
+                "pnpm" => Some("pnpm"),
+                "yarn" => Some("yarn"),
+                "bun" => Some("bun"),
+                _ => None,
+            };
+        }
+    }
+    
+    None
+}
+
 fn check_npm(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
-    // Skip if it's pnpm, yarn, or bun (not npm)
-    if Regex::new(r"\b(pnpm|yarn|bun)\b").unwrap().is_match(line) {
+    // Only check if npm is the active package manager command
+    if detect_package_manager(line) != Some("npm") {
         return violations;
     }
 
@@ -255,6 +301,11 @@ fn check_npm(line: &str, line_num: usize) -> Vec<Violation> {
 fn check_pnpm(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
+    // Only check if pnpm is the active package manager command
+    if detect_package_manager(line) != Some("pnpm") {
+        return violations;
+    }
+
     // Check for pnpm install without --frozen-lockfile
     let pnpm_install_re = Regex::new(r"\bpnpm\s+install\b").unwrap();
     if pnpm_install_re.is_match(line)
@@ -285,6 +336,11 @@ fn check_pnpm(line: &str, line_num: usize) -> Vec<Violation> {
 
 fn check_yarn(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
+
+    // Only check if yarn is the active package manager command
+    if detect_package_manager(line) != Some("yarn") {
+        return violations;
+    }
 
     // Check for yarn install or bare yarn without --frozen-lockfile or --immutable
     let yarn_install_re = Regex::new(r"\byarn(\s+install)?(\s+)?($|&&|;|\||#)").unwrap();
@@ -318,6 +374,11 @@ fn check_yarn(line: &str, line_num: usize) -> Vec<Violation> {
 
 fn check_bun(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
+
+    // Only check if bun is the active package manager command
+    if detect_package_manager(line) != Some("bun") {
+        return violations;
+    }
 
     // Check for bun install without --frozen-lockfile
     let bun_install_re = Regex::new(r"\bbun\s+install\b").unwrap();
@@ -601,6 +662,192 @@ mod tests {
     #[test]
     fn test_bun_dev_flag_with_version_allowed() {
         let violations = check_bun("bun add -D prettier@3.0.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    // ===== Package Manager Command Detection Tests =====
+    // Reference: Issue #14 - Cross-product of all package managers
+    // Each package manager can install any other package manager as a package
+    
+    #[test]
+    fn test_detect_package_manager() {
+        assert_eq!(detect_package_manager("npm install"), Some("npm"));
+        assert_eq!(detect_package_manager("yarn install"), Some("yarn"));
+        assert_eq!(detect_package_manager("pnpm install"), Some("pnpm"));
+        assert_eq!(detect_package_manager("bun install"), Some("bun"));
+        assert_eq!(detect_package_manager("RUN npm install -g yarn"), Some("npm"));
+        assert_eq!(detect_package_manager("  yarn add package"), Some("yarn"));
+        assert_eq!(detect_package_manager("no package manager here"), None);
+    }
+
+    // ===== npm installing other package managers Tests =====
+    
+    #[test]
+    fn test_npm_install_yarn_without_version_violation() {
+        // npm install -g yarn should suggest npm version pinning, not yarn lockfile usage
+        let violations = check_npm("npm install -g yarn", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+        assert!(!violations[0].message.contains("yarn"));
+        
+        // yarn checker should not flag this
+        let yarn_violations = check_yarn("npm install -g yarn", 1);
+        assert_eq!(yarn_violations.len(), 0);
+    }
+
+    #[test]
+    fn test_npm_install_yarn_with_version_allowed() {
+        let violations = check_npm("npm install -g yarn@1.22.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_npm_install_pnpm_without_version_violation() {
+        let violations = check_npm("npm install -g pnpm", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+        
+        // pnpm checker should not flag this
+        let pnpm_violations = check_pnpm("npm install -g pnpm", 1);
+        assert_eq!(pnpm_violations.len(), 0);
+    }
+
+    #[test]
+    fn test_npm_install_pnpm_with_version_allowed() {
+        let violations = check_npm("npm install -g pnpm@8.10.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_npm_install_bun_without_version_violation() {
+        let violations = check_npm("npm install -g bun", 1);
+        assert_eq!(violations.len(), 1);
+        
+        // bun checker should not flag this
+        let bun_violations = check_bun("npm install -g bun", 1);
+        assert_eq!(bun_violations.len(), 0);
+    }
+
+    #[test]
+    fn test_npm_install_bun_with_version_allowed() {
+        let violations = check_npm("npm install -g bun@1.0.0", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    // ===== yarn installing other package managers Tests =====
+    
+    #[test]
+    fn test_yarn_global_add_npm_without_version_violation() {
+        let violations = check_yarn("yarn global add npm", 1);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+        
+        // npm checker should not flag this
+        let npm_violations = check_npm("yarn global add npm", 1);
+        assert_eq!(npm_violations.len(), 0);
+    }
+
+    #[test]
+    fn test_yarn_add_pnpm_without_version_violation() {
+        let violations = check_yarn("yarn add pnpm", 1);
+        assert_eq!(violations.len(), 1);
+        
+        // pnpm checker should not flag this
+        let pnpm_violations = check_pnpm("yarn add pnpm", 1);
+        assert_eq!(pnpm_violations.len(), 0);
+    }
+
+    #[test]
+    fn test_yarn_add_bun_without_version_violation() {
+        let violations = check_yarn("yarn add bun", 1);
+        assert_eq!(violations.len(), 1);
+        
+        // bun checker should not flag this
+        let bun_violations = check_bun("yarn add bun", 1);
+        assert_eq!(bun_violations.len(), 0);
+    }
+
+    // ===== pnpm installing other package managers Tests =====
+    
+    #[test]
+    fn test_pnpm_add_npm_without_version_violation() {
+        let violations = check_pnpm("pnpm add npm", 1);
+        assert_eq!(violations.len(), 1);
+        
+        // npm checker should not flag this
+        let npm_violations = check_npm("pnpm add npm", 1);
+        assert_eq!(npm_violations.len(), 0);
+    }
+
+    #[test]
+    fn test_pnpm_add_yarn_without_version_violation() {
+        let violations = check_pnpm("pnpm add yarn", 1);
+        assert_eq!(violations.len(), 1);
+        
+        // yarn checker should not flag this
+        let yarn_violations = check_yarn("pnpm add yarn", 1);
+        assert_eq!(yarn_violations.len(), 0);
+    }
+
+    #[test]
+    fn test_pnpm_add_bun_without_version_violation() {
+        let violations = check_pnpm("pnpm add bun", 1);
+        assert_eq!(violations.len(), 1);
+        
+        // bun checker should not flag this
+        let bun_violations = check_bun("pnpm add bun", 1);
+        assert_eq!(bun_violations.len(), 0);
+    }
+
+    // ===== bun installing other package managers Tests =====
+    
+    #[test]
+    fn test_bun_add_npm_without_version_violation() {
+        let violations = check_bun("bun add npm", 1);
+        assert_eq!(violations.len(), 1);
+        
+        // npm checker should not flag this
+        let npm_violations = check_npm("bun add npm", 1);
+        assert_eq!(npm_violations.len(), 0);
+    }
+
+    #[test]
+    fn test_bun_add_yarn_without_version_violation() {
+        let violations = check_bun("bun add yarn", 1);
+        assert_eq!(violations.len(), 1);
+        
+        // yarn checker should not flag this
+        let yarn_violations = check_yarn("bun add yarn", 1);
+        assert_eq!(yarn_violations.len(), 0);
+    }
+
+    #[test]
+    fn test_bun_add_pnpm_without_version_violation() {
+        let violations = check_bun("bun add pnpm", 1);
+        assert_eq!(violations.len(), 1);
+        
+        // pnpm checker should not flag this
+        let pnpm_violations = check_pnpm("bun add pnpm", 1);
+        assert_eq!(pnpm_violations.len(), 0);
+    }
+
+    // ===== Existing command skip tests =====
+    
+    #[test]
+    fn test_yarn_command_skipped_by_npm_checker() {
+        let violations = check_npm("yarn install", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_pnpm_command_skipped_by_npm_checker() {
+        let violations = check_npm("pnpm install", 1);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_bun_command_skipped_by_npm_checker() {
+        let violations = check_npm("bun install", 1);
         assert_eq!(violations.len(), 0);
     }
 }
