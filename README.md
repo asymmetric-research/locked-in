@@ -78,7 +78,3 @@ Exit code 0 on success, 1 if violations found.
 ═══════════════════════════════════════
 ✗ Found 2 violation(s) in 2 files
 ```
-
-## License
-
-Apache 2.0
