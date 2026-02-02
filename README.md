@@ -1,7 +1,4 @@
-# Lockfile Guard
-
-> [!WARNING]
-> Largely vibe-coded, trust at your own peril.
+# locked-in
 
 Lints JavaScript package manager commands (npm, pnpm, yarn, bun) to enforce version pinning and lockfile usage.
 
@@ -40,17 +37,17 @@ name: Lint Package Installs
 on: [push, pull_request]
 
 jobs:
-  lockfile-guard:
+  locked-in:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: asymmetric-research/lockfile-guard@main
+      - uses: asymmetric-research/locked-in@main
 ```
 
 To pin to a specific commit:
 
 ```yaml
-      - uses: asymmetric-research/lockfile-guard@main
+      - uses: asymmetric-research/locked-in@main
         with:
           commit: abc123f  # specific commit SHA
 ```
@@ -59,10 +56,10 @@ To pin to a specific commit:
 
 ```bash
 # Install
-cargo install --git https://github.com/asymmetric-research/lockfile-guard
+cargo install --git https://github.com/asymmetric-research/locked-in
 
 # Run
-lockfile-guard
+locked-in
 ```
 
 Exit code 0 on success, 1 if violations found.

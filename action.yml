@@ -1,4 +1,4 @@
-name: 'Lockfile Guard'
+name: 'locked-in'
 description: 'Lints for improper JS package manager usage (npm, pnpm, yarn, bun) to enforce supply chain security'
 author: 'Asymmetric Research'
 
@@ -15,14 +15,14 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Download lockfile-guard binary
+    - name: Download locked-in binary
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         INPUT_COMMIT: ${{ inputs.commit }}
       run: |
-        # Repository where lockfile-guard is published
-        LOCKFILE_GUARD_REPO="asymmetric-research/lockfile-guard"
+        # Repository where locked-in is published
+        LOCKFILE_GUARD_REPO="asymmetric-research/locked-in"
 
         # Determine which commit to use
         COMMIT="${INPUT_COMMIT}"
@@ -39,7 +39,7 @@ runs:
           }
         fi
         
-        echo "Using lockfile-guard from commit: ${COMMIT}"
+        echo "Using locked-in from commit: ${COMMIT}"
         
         # Try to download artifact from GitHub Actions
         echo "Downloading binary artifact from ${LOCKFILE_GUARD_REPO}..."
@@ -47,18 +47,18 @@ runs:
         # Use gh CLI to download artifact if available
         if command -v gh &> /dev/null; then
           # Try to download the specific commit artifact first
-          if gh run download --repo "${LOCKFILE_GUARD_REPO}" -n "lockfile-guard-${COMMIT}" 2>/dev/null; then
-            mv lockfile-guard-linux-x64 lockfile-guard
-            chmod +x lockfile-guard
+          if gh run download --repo "${LOCKFILE_GUARD_REPO}" -n "locked-in-${COMMIT}" 2>/dev/null; then
+            mv locked-in-linux-x64 locked-in
+            chmod +x locked-in
             echo "Successfully downloaded binary for commit ${COMMIT}"
           # Fall back to latest
-          elif gh run download --repo "${LOCKFILE_GUARD_REPO}" -n "lockfile-guard-latest" 2>/dev/null; then
-            mv lockfile-guard-linux-x64 lockfile-guard
-            chmod +x lockfile-guard
+          elif gh run download --repo "${LOCKFILE_GUARD_REPO}" -n "locked-in-latest" 2>/dev/null; then
+            mv locked-in-linux-x64 locked-in
+            chmod +x locked-in
             echo "Successfully downloaded latest binary"
           else
             echo "Error: Could not download binary artifact."
-            echo "Please ensure the lockfile-guard repository has built binaries available."
+            echo "Please ensure the locked-in repository has built binaries available."
             exit 1
           fi
         else
@@ -66,6 +66,6 @@ runs:
           exit 1
         fi
 
-    - name: Run lockfile-guard
+    - name: Run locked-in
       shell: bash
-      run: ./lockfile-guard
+      run: ./locked-in

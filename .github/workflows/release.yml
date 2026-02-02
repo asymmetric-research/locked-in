@@ -26,13 +26,13 @@ jobs:
       - name: Prepare binary
         run: |
           mkdir -p dist
-          cp target/release/lockfile-guard dist/lockfile-guard-linux-x64
-          chmod +x dist/lockfile-guard-linux-x64
+          cp target/release/locked-in dist/locked-in-linux-x64
+          chmod +x dist/locked-in-linux-x64
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: dist/lockfile-guard-linux-x64
+          files: dist/locked-in-linux-x64
           draft: false
           prerelease: false
           generate_release_notes: true
