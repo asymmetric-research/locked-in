@@ -41,6 +41,10 @@ fn main() {
             )
             .red()
         );
+        println!(
+            "{}",
+            "Tip: use lockfiles/version pins plus dependency cooldowns (minimum release age) for defense in depth.".blue()
+        );
         println!();
         process::exit(1);
     }

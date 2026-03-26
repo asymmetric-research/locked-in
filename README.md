@@ -2,6 +2,8 @@
 
 Lints JavaScript package manager commands (npm, pnpm, yarn, bun) to enforce version pinning and lockfile usage.
 
+For stronger supply-chain hygiene, combine lockfiles and version pinning with package-manager dependency cooldowns (minimum release age), which reduce risk from newly published malicious packages.
+
 ## Rules
 
 **npm:**
@@ -63,6 +65,27 @@ locked-in
 ```
 
 Exit code 0 on success, 1 if violations found.
+
+## Dependency Cooldowns
+
+Lockfiles and version pinning are the primary controls this tool enforces. As defense in depth, consider enabling dependency cooldowns (minimum release age) in your package manager so very new package versions are not installable immediately.
+
+A good overview of dependency cooldown support can be found in the post [Package managers need to cool down](https://nesbitt.io/2026/03/04/package-managers-need-to-cool-down.html).
+
+- Use lockfiles + version pins to ensure reproducibility.
+- Use a minimum release age/cooldown to reduce exposure to fresh supply-chain attacks.
+- Keep this as an organizational policy in repo-level config where possible.
+
+Example policy (npm):
+
+```ini
+# .npmrc
+minimumReleaseAge=1440
+```
+
+Manager notes:
+- npm: supports `minimumReleaseAge` in config.
+- pnpm/yarn/bun: no direct equivalent documented here; keep using strict lockfile installs and exact version pins.
 
 ## Example
 
