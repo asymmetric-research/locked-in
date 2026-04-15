@@ -20,6 +20,7 @@ For stronger supply-chain hygiene, combine lockfiles and version pinning with pa
 
 **bun:**
 - ✅ `bun install --frozen-lockfile`, `bun add package@version`
+- ✅ bare `bun install` only when repo-local `bunfig.toml` sets `[install].frozenLockfile = true` (https://bun.com/docs/runtime/bunfig#install-frozenlockfile)
 - ❌ `bun install`, `bun add package`
 
 ## Scanned Files
@@ -62,6 +63,9 @@ cargo install --git https://github.com/asymmetric-research/locked-in
 
 # Run
 locked-in
+
+# Or scan a specific repository
+locked-in /path/to/repo
 ```
 
 Exit code 0 on success, 1 if violations found.
