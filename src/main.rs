@@ -220,8 +220,7 @@ fn bun_frozen_lockfile_enabled(
         }
 
         let enabled = fs::read_to_string(&bunfig_path)
-            .map(|content| bunfig_has_frozen_lockfile(&content))
-            .unwrap_or(false);
+            .is_ok_and(|content| bunfig_has_frozen_lockfile(&content));
         cache.insert(bunfig_path, enabled);
         return enabled;
     }
