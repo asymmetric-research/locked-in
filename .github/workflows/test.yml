@@ -33,5 +33,6 @@ jobs:
       - name: Test violations detected
         run: |
           echo "npm install" > test-violations.sh
-          echo "pnpm add eslint" >> test-violations.sh
+          # Keep the fixture generated command split so dogfooding this workflow does not flag it.
+          printf '%s %s\n' pnpm 'add eslint' >> test-violations.sh
           ! ./target/release/locked-in
