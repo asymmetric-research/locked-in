@@ -53,6 +53,11 @@ struct LintContext {
     is_markdown: bool,
 }
 
+struct SubmodulePruner {
+    root: PathBuf,
+    gitmodules_paths: Vec<PathBuf>,
+}
+
 fn main() {
     let root = env::args()
         .nth(1)
@@ -94,13 +99,16 @@ fn main() {
 }
 
 fn lint_files(root: &Path) -> LintResult {
+    let submodule_pruner = SubmodulePruner::new(root);
     let files_to_check: Vec<PathBuf> = WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .parents(true)
-        .filter_entry(|e| !is_excluded(e.path()))
+        .filter_entry(move |e| {
+            !is_excluded(e.path()) && !submodule_pruner.is_submodule_dir(e.path())
+        })
         .build()
         .filter_map(Result::ok)
         .map(ignore::DirEntry::into_path)
@@ -163,6 +171,59 @@ fn is_excluded(path: &Path) -> bool {
             || name == OsStr::new(".turbo")
             || name == OsStr::new(".cache")
     }) || path.file_name() == Some(OsStr::new("lint-package-install.sh"))
+}
+
+impl SubmodulePruner {
+    fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            gitmodules_paths: parse_gitmodules_paths(root),
+        }
+    }
+
+    fn is_submodule_dir(&self, path: &Path) -> bool {
+        self.is_declared_submodule_path(path) || has_gitdir_file(path)
+    }
+
+    fn is_declared_submodule_path(&self, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(&self.root) else {
+            return false;
+        };
+
+        self.gitmodules_paths
+            .iter()
+            .any(|submodule_path| relative == submodule_path)
+    }
+}
+
+fn parse_gitmodules_paths(root: &Path) -> Vec<PathBuf> {
+    let Ok(content) = fs::read_to_string(root.join(".gitmodules")) else {
+        return Vec::new();
+    };
+
+    parse_gitmodules_paths_from_content(&content)
+}
+
+fn parse_gitmodules_paths_from_content(content: &str) -> Vec<PathBuf> {
+    content
+        .lines()
+        .filter_map(|line| line.trim().split_once('='))
+        .filter_map(|(key, value)| {
+            if key.trim() == "path" {
+                Some(PathBuf::from(value.trim().trim_matches('"')))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn has_gitdir_file(path: &Path) -> bool {
+    fs::read_to_string(path.join(".git")).is_ok_and(|content| {
+        content
+            .lines()
+            .any(|line| line.trim_start().starts_with("gitdir:"))
+    })
 }
 
 fn should_check_file(path: &Path) -> bool {
@@ -558,6 +619,35 @@ mod tests {
     fn test_github_workflows_not_excluded_as_git_dir() {
         assert!(!is_excluded(Path::new(".github/workflows/ci.yml")));
         assert!(should_check_file(Path::new(".github/workflows/ci.yml")));
+    }
+
+    #[test]
+    fn test_parse_gitmodules_paths() {
+        let content = r#"
+[submodule "vendor/foo"]
+    path = vendor/foo
+    url = https://example.com/foo.git
+[submodule "deps/bar"]
+    path = "deps/bar"
+    url = https://example.com/bar.git
+"#;
+
+        assert_eq!(
+            parse_gitmodules_paths_from_content(content),
+            vec![PathBuf::from("vendor/foo"), PathBuf::from("deps/bar")]
+        );
+    }
+
+    #[test]
+    fn test_declared_submodule_path_detected() {
+        let pruner = SubmodulePruner {
+            root: PathBuf::from("/repo"),
+            gitmodules_paths: vec![PathBuf::from("deps/foo")],
+        };
+
+        assert!(pruner.is_declared_submodule_path(Path::new("/repo/deps/foo")));
+        assert!(!pruner.is_declared_submodule_path(Path::new("/repo/deps/foo/src")));
+        assert!(!pruner.is_declared_submodule_path(Path::new("/repo/deps/bar")));
     }
 
     #[test]
