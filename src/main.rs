@@ -1,12 +1,35 @@
 use colored::Colorize;
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::WalkBuilder;
+use rayon::prelude::*;
 use regex::Regex;
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
-use walkdir::WalkDir;
+use std::sync::{LazyLock, Mutex};
+
+static PACKAGE_MANAGER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(pnpm|yarn|bun)\b").unwrap());
+static NPM_CI_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bnpm\s+ci\b").unwrap());
+static NPM_INSTALL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bnpm\s+(install|i)(\s|$)").unwrap());
+static VERSION_PIN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"@[0-9]+\.[0-9]+").unwrap());
+static BARE_NPM_INSTALL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bnpm\s+(install|i)(\s+)?($|&&|;|\||#)").unwrap());
+static PNPM_INSTALL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bpnpm\s+install\b").unwrap());
+static PNPM_ADD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bpnpm\s+add\s").unwrap());
+static YARN_INSTALL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\byarn(\s+install)?(\s+)?($|&&|;|\||#)").unwrap());
+static YARN_FROZEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"--(frozen-lockfile|immutable)").unwrap());
+static YARN_ADD_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\byarn\s+(global\s+)?add\s").unwrap());
+static BUN_INSTALL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bbun\s+install\b").unwrap());
+static BUN_ADD_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bbun\s+add\s").unwrap());
 
 #[derive(Debug)]
 struct Violation {
@@ -18,6 +41,11 @@ struct Violation {
 struct LintResult {
     violations_found: usize,
     files_checked: usize,
+}
+
+struct FileLintResult {
+    path: PathBuf,
+    violations: Vec<Violation>,
 }
 
 struct LintContext {
@@ -35,9 +63,7 @@ fn main() {
         "Checking for JS package manager violations...\n".blue()
     );
 
-    // Collect all .gitignore files in the repository
-    let gitignores = collect_gitignores(&root);
-    let result = lint_files(&root, &gitignores);
+    let result = lint_files(&root);
 
     println!();
     println!("{}", "═══════════════════════════════════════".blue());
@@ -67,105 +93,85 @@ fn main() {
     }
 }
 
-fn collect_gitignores(root: &Path) -> Vec<(PathBuf, Gitignore)> {
-    let mut gitignores = Vec::new();
-
-    for entry in WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| {
-            let path = e.path();
-            // Don't traverse into .git directory
-            !path.to_string_lossy().contains("/.git/")
-        })
-        .filter_map(Result::ok)
-    {
-        let path = entry.path();
-        if path.is_file()
-            && path.file_name().and_then(|n| n.to_str()) == Some(".gitignore")
-            && let Some(parent) = path.parent()
-        {
-            let mut builder = GitignoreBuilder::new(parent);
-            if builder.add(path).is_none()
-                && let Ok(gitignore) = builder.build()
-            {
-                gitignores.push((parent.to_path_buf(), gitignore));
-            }
-        }
-    }
-
-    gitignores
-}
-
-fn is_ignored(path: &Path, gitignores: &[(PathBuf, Gitignore)]) -> bool {
-    for (base_path, gitignore) in gitignores {
-        // Check if the file is under this gitignore's directory
-        if let Ok(relative) = path.strip_prefix(base_path) {
-            let matched = gitignore.matched(relative, path.is_dir());
-            if matched.is_ignore() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn lint_files(root: &Path, gitignores: &[(PathBuf, Gitignore)]) -> LintResult {
-    let mut violations_found: usize = 0;
-    let mut files_checked: usize = 0;
-    let mut bun_context_cache: HashMap<PathBuf, bool> = HashMap::new();
-
-    for entry in WalkDir::new(root)
-        .into_iter()
+fn lint_files(root: &Path) -> LintResult {
+    let files_to_check: Vec<PathBuf> = WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
         .filter_entry(|e| !is_excluded(e.path()))
+        .build()
         .filter_map(Result::ok)
-    {
-        let path = entry.path();
+        .map(ignore::DirEntry::into_path)
+        .filter(|path| path.is_file() && should_check_file(path))
+        .collect();
 
-        if path.is_file() && should_check_file(path) {
-            files_checked = files_checked.saturating_add(1);
+    let bun_context_cache: Mutex<HashMap<PathBuf, bool>> = Mutex::new(HashMap::new());
 
-            if let Ok(content) = fs::read_to_string(path) {
-                let context = LintContext {
-                    bun_frozen_lockfile: bun_frozen_lockfile_enabled(
-                        root,
-                        path,
-                        &mut bun_context_cache,
-                    ),
-                    is_markdown: path
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md")),
-                };
-                let violations = check_file(&content, &context);
+    let mut checked_results: Vec<FileLintResult> = files_to_check
+        .par_iter()
+        .filter_map(|path| lint_file(root, path, &bun_context_cache))
+        .collect();
 
-                if !violations.is_empty() {
-                    // Skip reporting if file is in gitignore
-                    if is_ignored(path, gitignores) {
-                        continue;
-                    }
+    checked_results.sort_by(|a, b| a.path.cmp(&b.path));
 
-                    print_violations(path, &violations);
-                    violations_found = violations_found.saturating_add(violations.len());
-                }
-            }
+    let mut violations_found: usize = 0;
+
+    for result in &checked_results {
+        if !result.violations.is_empty() {
+            print_violations(&result.path, &result.violations);
+            violations_found = violations_found.saturating_add(result.violations.len());
         }
     }
 
     LintResult {
         violations_found,
-        files_checked,
+        files_checked: checked_results.len(),
     }
 }
 
+fn lint_file(
+    root: &Path,
+    path: &Path,
+    bun_context_cache: &Mutex<HashMap<PathBuf, bool>>,
+) -> Option<FileLintResult> {
+    let source = fs::read_to_string(path).ok()?;
+    let context = LintContext {
+        bun_frozen_lockfile: bun_frozen_lockfile_enabled(root, path, bun_context_cache),
+        is_markdown: has_extension(path, "md"),
+    };
+
+    Some(FileLintResult {
+        path: path.to_path_buf(),
+        violations: check_file(&source, &context),
+    })
+}
+
 fn is_excluded(path: &Path) -> bool {
-    let path_str = path.to_string_lossy();
-    path_str.contains("node_modules")
-        || path_str.contains(".git")
-        || path_str.ends_with("lint-package-install.sh")
+    path.components().any(|component| {
+        let name = component.as_os_str();
+        name == OsStr::new("node_modules")
+            || name == OsStr::new(".git")
+            || name == OsStr::new("target")
+            || name == OsStr::new("dist")
+            || name == OsStr::new("build")
+            || name == OsStr::new("coverage")
+            || name == OsStr::new("vendor")
+            || name == OsStr::new(".next")
+            || name == OsStr::new(".nuxt")
+            || name == OsStr::new(".turbo")
+            || name == OsStr::new(".cache")
+    }) || path.file_name() == Some(OsStr::new("lint-package-install.sh"))
 }
 
 fn should_check_file(path: &Path) -> bool {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let path_str = path.to_string_lossy();
+
+    if is_makefile(file_name) {
+        return true;
+    }
 
     // Check Dockerfiles
     if file_name.starts_with("Dockerfile") || file_name.ends_with(".dockerfile") {
@@ -173,25 +179,17 @@ fn should_check_file(path: &Path) -> bool {
     }
 
     // Check markdown files
-    if Path::new(file_name)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-    {
+    if has_extension(path, "md") {
         return true;
     }
 
-    // Check shell scripts
-    if Path::new(file_name)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("sh"))
-    {
+    // Check shell scripts and common shell-specific files
+    if is_shell_file(path) {
         return true;
     }
 
     // Check GitHub workflow files
-    let is_yaml = Path::new(file_name)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"));
+    let is_yaml = has_extension(path, "yml") || has_extension(path, "yaml");
 
     if is_yaml && path_str.contains(".github/workflows") {
         return true;
@@ -200,10 +198,28 @@ fn should_check_file(path: &Path) -> bool {
     false
 }
 
+fn has_extension(path: &Path, extension: &str) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+}
+
+fn is_shell_file(path: &Path) -> bool {
+    ["sh", "bash", "zsh", "fish", "ksh", "csh"]
+        .iter()
+        .any(|extension| has_extension(path, extension))
+}
+
+fn is_makefile(file_name: &str) -> bool {
+    file_name == "Makefile"
+        || file_name == "makefile"
+        || file_name == "GNUmakefile"
+        || has_extension(Path::new(file_name), "mk")
+}
+
 fn bun_frozen_lockfile_enabled(
     root: &Path,
     path: &Path,
-    cache: &mut HashMap<PathBuf, bool>,
+    cache: &Mutex<HashMap<PathBuf, bool>>,
 ) -> bool {
     for ancestor in path.ancestors().filter(|ancestor| ancestor.is_dir()) {
         if !ancestor.starts_with(root) {
@@ -215,13 +231,20 @@ fn bun_frozen_lockfile_enabled(
             continue;
         }
 
-        if let Some(enabled) = cache.get(&bunfig_path) {
+        if let Some(enabled) = cache
+            .lock()
+            .expect("bun cache mutex poisoned")
+            .get(&bunfig_path)
+        {
             return *enabled;
         }
 
         let enabled = fs::read_to_string(&bunfig_path)
             .is_ok_and(|content| bunfig_has_frozen_lockfile(&content));
-        cache.insert(bunfig_path, enabled);
+        cache
+            .lock()
+            .expect("bun cache mutex poisoned")
+            .insert(bunfig_path, enabled);
         return enabled;
     }
 
@@ -322,27 +345,24 @@ fn check_npm(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
     // Skip if it's pnpm, yarn, or bun (not npm)
-    if Regex::new(r"\b(pnpm|yarn|bun)\b").unwrap().is_match(line) {
+    if PACKAGE_MANAGER_RE.is_match(line) {
         return violations;
     }
 
     // NPM CI is always allowed
-    if Regex::new(r"\bnpm\s+ci\b").unwrap().is_match(line) {
+    if NPM_CI_RE.is_match(line) {
         return violations;
     }
 
     // Check for npm install or npm i
-    let npm_install_re = Regex::new(r"\bnpm\s+(install|i)(\s|$)").unwrap();
-    if npm_install_re.is_match(line) {
+    if NPM_INSTALL_RE.is_match(line) {
         // Check if it has a version pin
-        let version_pin_re = Regex::new(r"@[0-9]+\.[0-9]+").unwrap();
-        if version_pin_re.is_match(line) {
+        if VERSION_PIN_RE.is_match(line) {
             return violations; // Has version pin, allowed
         }
 
         // Check if it's bare 'npm install' (should use npm ci)
-        let bare_install_re = Regex::new(r"\bnpm\s+(install|i)(\s+)?($|&&|;|\||#)").unwrap();
-        if bare_install_re.is_match(line) {
+        if BARE_NPM_INSTALL_RE.is_match(line) {
             violations.push(Violation {
                 line_num,
                 message: "Use 'npm ci' instead of 'npm install' for lockfile-based installations"
@@ -367,8 +387,7 @@ fn check_pnpm(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
     // Check for pnpm install without --frozen-lockfile
-    let pnpm_install_re = Regex::new(r"\bpnpm\s+install\b").unwrap();
-    if pnpm_install_re.is_match(line) && !line.contains("--frozen-lockfile") {
+    if PNPM_INSTALL_RE.is_match(line) && !line.contains("--frozen-lockfile") {
         violations.push(Violation {
             line_num,
             message: "Use 'pnpm install --frozen-lockfile' to respect lockfile".to_string(),
@@ -377,18 +396,14 @@ fn check_pnpm(line: &str, line_num: usize) -> Vec<Violation> {
     }
 
     // Check for pnpm add without version
-    let pnpm_add_re = Regex::new(r"\bpnpm\s+add\s").unwrap();
-    if pnpm_add_re.is_match(line) {
-        let version_pin_re = Regex::new(r"@[0-9]+\.[0-9]+").unwrap();
-        if !version_pin_re.is_match(line) {
-            violations.push(Violation {
-                line_num,
-                message:
-                    "pnpm package installation without version pin (use 'pnpm add package@version')"
-                        .to_string(),
-                line_content: line.trim().to_string(),
-            });
-        }
+    if PNPM_ADD_RE.is_match(line) && !VERSION_PIN_RE.is_match(line) {
+        violations.push(Violation {
+            line_num,
+            message:
+                "pnpm package installation without version pin (use 'pnpm add package@version')"
+                    .to_string(),
+            line_content: line.trim().to_string(),
+        });
     }
 
     violations
@@ -398,31 +413,23 @@ fn check_yarn(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
     // Check for yarn install or bare yarn without --frozen-lockfile or --immutable
-    let yarn_install_re = Regex::new(r"\byarn(\s+install)?(\s+)?($|&&|;|\||#)").unwrap();
-    if yarn_install_re.is_match(line) {
-        let frozen_re = Regex::new(r"--(frozen-lockfile|immutable)").unwrap();
-        if !frozen_re.is_match(line) {
-            violations.push(Violation {
-                line_num,
-                message: "Use 'yarn install --frozen-lockfile' to respect lockfile".to_string(),
-                line_content: line.trim().to_string(),
-            });
-        }
+    if YARN_INSTALL_RE.is_match(line) && !YARN_FROZEN_RE.is_match(line) {
+        violations.push(Violation {
+            line_num,
+            message: "Use 'yarn install --frozen-lockfile' to respect lockfile".to_string(),
+            line_content: line.trim().to_string(),
+        });
     }
 
     // Check for yarn add without version
-    let yarn_add_re = Regex::new(r"\byarn\s+(global\s+)?add\s").unwrap();
-    if yarn_add_re.is_match(line) {
-        let version_pin_re = Regex::new(r"@[0-9]+\.[0-9]+").unwrap();
-        if !version_pin_re.is_match(line) {
-            violations.push(Violation {
-                line_num,
-                message:
-                    "yarn package installation without version pin (use 'yarn add package@version')"
-                        .to_string(),
-                line_content: line.trim().to_string(),
-            });
-        }
+    if YARN_ADD_RE.is_match(line) && !VERSION_PIN_RE.is_match(line) {
+        violations.push(Violation {
+            line_num,
+            message:
+                "yarn package installation without version pin (use 'yarn add package@version')"
+                    .to_string(),
+            line_content: line.trim().to_string(),
+        });
     }
 
     violations
@@ -434,8 +441,7 @@ fn check_bun(line: &str, line_num: usize, bun_frozen_lockfile: bool) -> Vec<Viol
     // Bun only freezes installs when `--frozen-lockfile` is passed or a repo-local
     // bunfig.toml enables `[install].frozenLockfile = true`.
     // Docs: https://bun.com/docs/runtime/bunfig#install-frozenlockfile
-    let bun_install_re = Regex::new(r"\bbun\s+install\b").unwrap();
-    if bun_install_re.is_match(line) && !line.contains("--frozen-lockfile") && !bun_frozen_lockfile
+    if BUN_INSTALL_RE.is_match(line) && !line.contains("--frozen-lockfile") && !bun_frozen_lockfile
     {
         violations.push(Violation {
                 line_num,
@@ -445,18 +451,13 @@ fn check_bun(line: &str, line_num: usize, bun_frozen_lockfile: bool) -> Vec<Viol
     }
 
     // Check for bun add without version
-    let bun_add_re = Regex::new(r"\bbun\s+add\s").unwrap();
-    if bun_add_re.is_match(line) {
-        let version_pin_re = Regex::new(r"@[0-9]+\.[0-9]+").unwrap();
-        if !version_pin_re.is_match(line) {
-            violations.push(Violation {
-                line_num,
-                message:
-                    "bun package installation without version pin (use 'bun add package@version')"
-                        .to_string(),
-                line_content: line.trim().to_string(),
-            });
-        }
+    if BUN_ADD_RE.is_match(line) && !VERSION_PIN_RE.is_match(line) {
+        violations.push(Violation {
+            line_num,
+            message: "bun package installation without version pin (use 'bun add package@version')"
+                .to_string(),
+            line_content: line.trim().to_string(),
+        });
     }
 
     violations
@@ -476,6 +477,7 @@ fn print_violations(path: &Path, violations: &[Violation]) {
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_raw_string_hashes, clippy::similar_names)]
 mod tests {
     use super::*;
 
@@ -533,10 +535,29 @@ mod tests {
     fn test_bun_frozen_lockfile_enabled_stays_within_root() {
         let root = Path::new("/tmp/project");
         let file = Path::new("/tmp/project/docs/README.md");
-        let mut cache = HashMap::new();
-        cache.insert(PathBuf::from("/tmp/bunfig.toml"), true);
+        let cache = Mutex::new(HashMap::from([(PathBuf::from("/tmp/bunfig.toml"), true)]));
 
-        assert!(!bun_frozen_lockfile_enabled(root, file, &mut cache));
+        assert!(!bun_frozen_lockfile_enabled(root, file, &cache));
+    }
+
+    #[test]
+    fn test_shell_like_extensions_checked() {
+        for file_name in ["install.sh", "install.bash", "install.zsh", "install.fish"] {
+            assert!(should_check_file(Path::new(file_name)));
+        }
+    }
+
+    #[test]
+    fn test_makefiles_checked() {
+        for file_name in ["Makefile", "makefile", "GNUmakefile", "rules.mk"] {
+            assert!(should_check_file(Path::new(file_name)));
+        }
+    }
+
+    #[test]
+    fn test_github_workflows_not_excluded_as_git_dir() {
+        assert!(!is_excluded(Path::new(".github/workflows/ci.yml")));
+        assert!(should_check_file(Path::new(".github/workflows/ci.yml")));
     }
 
     #[test]
