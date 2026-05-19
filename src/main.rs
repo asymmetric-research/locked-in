@@ -107,7 +107,8 @@ fn lint_files(root: &Path) -> LintResult {
         .git_exclude(true)
         .parents(true)
         .filter_entry(move |e| {
-            !is_excluded(e.path()) && !submodule_pruner.is_submodule_dir(e.path())
+            let path = e.path();
+            !is_excluded(path) && (!path.is_dir() || !submodule_pruner.is_submodule_dir(path))
         })
         .build()
         .filter_map(Result::ok)
@@ -182,7 +183,8 @@ impl SubmodulePruner {
     }
 
     fn is_submodule_dir(&self, path: &Path) -> bool {
-        self.is_declared_submodule_path(path) || has_gitdir_file(path)
+        self.is_declared_submodule_path(path)
+            || (path != self.root && has_submodule_gitdir_file(path))
     }
 
     fn is_declared_submodule_path(&self, path: &Path) -> bool {
@@ -218,12 +220,26 @@ fn parse_gitmodules_paths_from_content(content: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-fn has_gitdir_file(path: &Path) -> bool {
-    fs::read_to_string(path.join(".git")).is_ok_and(|content| {
-        content
-            .lines()
-            .any(|line| line.trim_start().starts_with("gitdir:"))
+fn has_submodule_gitdir_file(path: &Path) -> bool {
+    fs::read_to_string(path.join(".git"))
+        .ok()
+        .and_then(|content| parse_gitdir_target_from_content(&content))
+        .is_some_and(|gitdir| gitdir_target_is_submodule(&gitdir))
+}
+
+fn parse_gitdir_target_from_content(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        line.trim_start()
+            .strip_prefix("gitdir:")
+            .map(|gitdir| gitdir.trim().to_string())
     })
+}
+
+fn gitdir_target_is_submodule(gitdir: &str) -> bool {
+    let normalized = gitdir.replace('\\', "/");
+    normalized.contains("/.git/modules/")
+        || normalized.starts_with(".git/modules/")
+        || normalized.starts_with("../.git/modules/")
 }
 
 fn should_check_file(path: &Path) -> bool {
@@ -648,6 +664,22 @@ mod tests {
         assert!(pruner.is_declared_submodule_path(Path::new("/repo/deps/foo")));
         assert!(!pruner.is_declared_submodule_path(Path::new("/repo/deps/foo/src")));
         assert!(!pruner.is_declared_submodule_path(Path::new("/repo/deps/bar")));
+    }
+
+    #[test]
+    fn test_gitdir_target_submodule_detection() {
+        assert!(gitdir_target_is_submodule("../.git/modules/deps/foo"));
+        assert!(gitdir_target_is_submodule("/repo/.git/modules/deps/foo"));
+        assert!(!gitdir_target_is_submodule("/repo/.git/worktrees/feature"));
+        assert!(!gitdir_target_is_submodule("/repo/.git"));
+    }
+
+    #[test]
+    fn test_parse_gitdir_target() {
+        assert_eq!(
+            parse_gitdir_target_from_content("gitdir: ../.git/modules/deps/foo\n"),
+            Some("../.git/modules/deps/foo".to_string())
+        );
     }
 
     #[test]
