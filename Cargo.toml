@@ -1,13 +1,13 @@
 [package]
 name = "locked-in"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]
 regex = "1.10"
-walkdir = "2.4"
 colored = "2.1"
 ignore = "0.4"
+rayon = "1.10"
 
 [profile.dev]
 overflow-checks = true

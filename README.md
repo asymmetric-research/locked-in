@@ -27,8 +27,11 @@ For stronger supply-chain hygiene, combine lockfiles and version pinning with pa
 
 - Dockerfiles (`Dockerfile*`, `*.dockerfile`)
 - Markdown (`*.md`)
-- Shell scripts (`*.sh`)
+- Shell scripts (`*.sh`, `*.bash`, `*.zsh`, `*.fish`, `*.ksh`, `*.csh`)
+- Makefiles (`Makefile`, `makefile`, `GNUmakefile`, `*.mk`)
 - GitHub Actions workflows (`.github/workflows/*.yml`, `.github/workflows/*.yaml`)
+
+Scanning respects `.gitignore` and skips common generated/vendor directories such as `node_modules`, `target`, `dist`, `build`, `coverage`, `vendor`, `.next`, `.nuxt`, `.turbo`, and `.cache`.
 
 ## Usage
 
