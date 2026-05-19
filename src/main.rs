@@ -51,6 +51,7 @@ struct FileLintResult {
 struct LintContext {
     bun_frozen_lockfile: bool,
     is_markdown: bool,
+    is_package_json: bool,
 }
 
 struct SubmodulePruner {
@@ -149,6 +150,7 @@ fn lint_file(
     let context = LintContext {
         bun_frozen_lockfile: bun_frozen_lockfile_enabled(root, path, bun_context_cache),
         is_markdown: has_extension(path, "md"),
+        is_package_json: is_package_json(path),
     };
 
     Some(FileLintResult {
@@ -265,6 +267,11 @@ fn should_check_file(path: &Path) -> bool {
         return true;
     }
 
+    // Check package.json (npm/pnpm/yarn/bun scripts run here)
+    if is_package_json(path) {
+        return true;
+    }
+
     // Check GitHub workflow files
     let is_yaml = has_extension(path, "yml") || has_extension(path, "yaml");
 
@@ -273,6 +280,10 @@ fn should_check_file(path: &Path) -> bool {
     }
 
     false
+}
+
+fn is_package_json(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new("package.json"))
 }
 
 fn has_extension(path: &Path, extension: &str) -> bool {
@@ -357,6 +368,10 @@ fn bunfig_has_frozen_lockfile(content: &str) -> bool {
 }
 
 fn check_file(content: &str, lint_context: &LintContext) -> Vec<Violation> {
+    if lint_context.is_package_json {
+        return check_package_json(content, lint_context);
+    }
+
     let mut violations = Vec::new();
     let mut in_code_block = false;
     let mut lint_code_block = false;
@@ -393,6 +408,48 @@ fn check_file(content: &str, lint_context: &LintContext) -> Vec<Violation> {
     }
 
     violations
+}
+
+fn check_package_json(content: &str, lint_context: &LintContext) -> Vec<Violation> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Vec::new();
+    };
+    let Some(scripts) = value.get("scripts").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut violations = Vec::new();
+    for (name, script_value) in scripts {
+        let Some(script) = script_value.as_str() else {
+            continue;
+        };
+        let line_num = find_script_line(content, name).unwrap_or(1);
+
+        violations.extend(check_npm(script, line_num));
+        violations.extend(check_pnpm(script, line_num));
+        violations.extend(check_yarn(script, line_num));
+        violations.extend(check_bun(script, line_num, lint_context.bun_frozen_lockfile));
+    }
+
+    violations.sort_by_key(|v| v.line_num);
+    violations
+}
+
+fn find_script_line(content: &str, script_name: &str) -> Option<usize> {
+    let needle = format!("\"{script_name}\"");
+    let mut in_scripts = false;
+    for (idx, line) in content.lines().enumerate() {
+        if !in_scripts {
+            if line.contains("\"scripts\"") {
+                in_scripts = true;
+            }
+            continue;
+        }
+        if line.contains(&needle) {
+            return Some(idx.saturating_add(1));
+        }
+    }
+    None
 }
 
 fn is_comment_or_placeholder(line: &str) -> bool {
@@ -720,6 +777,7 @@ bun install
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: true,
+            is_package_json: false,
         };
 
         let violations = check_file(content, &context);
@@ -739,6 +797,7 @@ bun install
         let context = LintContext {
             bun_frozen_lockfile: true,
             is_markdown: true,
+            is_package_json: false,
         };
 
         let violations = check_file(content, &context);
@@ -758,6 +817,7 @@ Done in 1.2s
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: true,
+            is_package_json: false,
         };
 
         let violations = check_file(content, &context);
@@ -775,6 +835,7 @@ Done in 1.2s
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: true,
+            is_package_json: false,
         };
 
         let violations = check_file(content, &context);
@@ -793,6 +854,7 @@ $ bun install
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: true,
+            is_package_json: false,
         };
 
         let violations = check_file(content, &context);
@@ -812,6 +874,7 @@ bun add react@18.2.0
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: true,
+            is_package_json: false,
         };
 
         let violations = check_file(content, &context);
@@ -832,6 +895,7 @@ bun add react@18.2.0
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: true,
+            is_package_json: false,
         };
 
         let violations = check_file(content, &context);
@@ -848,6 +912,7 @@ fi
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: false,
+            is_package_json: false,
         };
 
         let violations = check_file(content, &context);
@@ -1075,5 +1140,192 @@ fi
         assert!(should_lint_markdown_code_block("```console"));
         assert!(!should_lint_markdown_code_block("```"));
         assert!(!should_lint_markdown_code_block("```text"));
+    }
+
+    // ===== package.json Tests =====
+
+    #[test]
+    fn test_package_json_detected() {
+        assert!(is_package_json(Path::new("package.json")));
+        assert!(is_package_json(Path::new("/repo/package.json")));
+        assert!(!is_package_json(Path::new("package-lock.json")));
+        assert!(!is_package_json(Path::new("packages.json")));
+        assert!(should_check_file(Path::new("package.json")));
+    }
+
+    fn package_json_context() -> LintContext {
+        LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: true,
+        }
+    }
+
+    #[test]
+    fn test_package_json_npm_install_violation() {
+        let content = r#"{
+  "name": "demo",
+  "scripts": {
+    "setup": "npm install"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("npm ci"));
+        assert_eq!(violations[0].line_num, 4);
+    }
+
+    #[test]
+    fn test_package_json_npm_ci_allowed() {
+        let content = r#"{
+  "scripts": {
+    "ci": "npm ci"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_package_json_yarn_install_violation() {
+        let content = r#"{
+  "scripts": {
+    "bootstrap": "yarn install"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("frozen-lockfile"));
+    }
+
+    #[test]
+    fn test_package_json_yarn_frozen_allowed() {
+        let content = r#"{
+  "scripts": {
+    "bootstrap": "yarn install --frozen-lockfile"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_package_json_pnpm_install_violation() {
+        let content = r#"{
+  "scripts": {
+    "bootstrap": "pnpm install"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("frozen-lockfile"));
+    }
+
+    #[test]
+    fn test_package_json_bun_install_violation() {
+        let content = r#"{
+  "scripts": {
+    "bootstrap": "bun install"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("bunfig.toml"));
+    }
+
+    #[test]
+    fn test_package_json_bun_install_allowed_with_bunfig_policy() {
+        let content = r#"{
+  "scripts": {
+    "bootstrap": "bun install"
+  }
+}"#;
+        let context = LintContext {
+            bun_frozen_lockfile: true,
+            is_markdown: false,
+            is_package_json: true,
+        };
+        let violations = check_file(content, &context);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_package_json_chained_command_violation() {
+        let content = r#"{
+  "scripts": {
+    "build": "npm install && tsc"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("npm ci"));
+    }
+
+    #[test]
+    fn test_package_json_add_without_version_violation() {
+        let content = r#"{
+  "scripts": {
+    "add-dep": "yarn add react"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("version pin"));
+    }
+
+    #[test]
+    fn test_package_json_add_with_version_allowed() {
+        let content = r#"{
+  "scripts": {
+    "add-dep": "yarn add react@18.2.0"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_package_json_ignores_non_script_fields() {
+        // Random commands appearing in description/keywords should not be linted.
+        let content = r#"{
+  "name": "demo",
+  "description": "Run npm install to set up",
+  "keywords": ["yarn install"],
+  "scripts": {
+    "ci": "npm ci"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_package_json_no_scripts_field() {
+        let content = r#"{
+  "name": "demo",
+  "version": "1.0.0"
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_package_json_invalid_json_ignored() {
+        let content = "{ not valid json";
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_package_json_multiple_violations() {
+        let content = r#"{
+  "scripts": {
+    "a": "npm install",
+    "b": "yarn install",
+    "c": "pnpm install"
+  }
+}"#;
+        let violations = check_file(content, &package_json_context());
+        assert_eq!(violations.len(), 3);
     }
 }

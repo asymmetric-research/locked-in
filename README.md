@@ -30,6 +30,7 @@ For stronger supply-chain hygiene, combine lockfiles and version pinning with pa
 - Shell scripts (`*.sh`, `*.bash`, `*.zsh`, `*.fish`, `*.ksh`, `*.csh`)
 - Makefiles (`Makefile`, `makefile`, `GNUmakefile`, `*.mk`)
 - GitHub Actions workflows (`.github/workflows/*.yml`, `.github/workflows/*.yaml`)
+- `package.json` (the `scripts` field — npm/pnpm/yarn/bun commands run from here)
 
 Scanning respects `.gitignore` and skips common generated/vendor directories such as `node_modules`, `target`, `dist`, `build`, `coverage`, `vendor`, `.next`, `.nuxt`, `.turbo`, and `.cache`.
 
