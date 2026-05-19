@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    paths: ['Cargo.toml']
   workflow_dispatch:
 
 jobs:
@@ -17,23 +17,45 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: check_tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Rust
+        if: steps.check_tag.outputs.exists == 'false'
         uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
         with:
           toolchain: stable
           cache: false
 
       - name: Build release binary
+        if: steps.check_tag.outputs.exists == 'false'
         run: cargo build --release --verbose
 
       - name: Prepare binary
+        if: steps.check_tag.outputs.exists == 'false'
         run: |
           mkdir -p dist
           cp target/release/locked-in dist/locked-in-linux-x64
           chmod +x dist/locked-in-linux-x64
 
       - name: Create Release
-        run: gh release create "$TAG_NAME" dist/locked-in-linux-x64 --generate-notes
+        if: steps.check_tag.outputs.exists == 'false'
+        run: gh release create "$TAG" dist/locked-in-linux-x64 --generate-notes --latest
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
