@@ -23,6 +23,35 @@ For stronger supply-chain hygiene, combine lockfiles and version pinning with pa
 - ✅ bare `bun install` only when repo-local `bunfig.toml` sets `[install].frozenLockfile = true` (https://bun.com/docs/runtime/bunfig#install-frozenlockfile)
 - ❌ `bun install`, `bun add package`
 
+## Ignore Directives
+
+Add an inline comment on the line before a violation to suppress it per-file:
+
+```
+# locked-in: ignore
+```
+
+This skips all checks on the next line. To suppress a specific rule, include the rule ID in brackets:
+
+```
+# locked-in: ignore[yarn-frozen-lockfile]
+```
+
+The comment style is extension-aware: `#` for shell, YAML, Makefile, and Dockerfile; `<!-- locked-in: ignore -->` for Markdown.
+
+**Available rule IDs:**
+
+| Rule ID | Description |
+|---|---|
+| `npm-install-bare` | bare `npm install` (should use `npm ci`) |
+| `npm-version-pin` | `npm i/pkg` without `@version` |
+| `pnpm-frozen-lockfile` | `pnpm install` without `--frozen-lockfile` |
+| `pnpm-version-pin` | `pnpm add` without `@version` |
+| `yarn-frozen-lockfile` | `yarn install` without `--frozen-lockfile`/`--immutable` |
+| `yarn-version-pin` | `yarn add` without `@version` |
+| `bun-frozen-lockfile` | `bun install` without `--frozen-lockfile` or config |
+| `bun-version-pin` | `bun add` without `@version` |
+
 ## Scanned Files
 
 - Dockerfiles (`Dockerfile*`, `*.dockerfile`)
