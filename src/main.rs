@@ -951,6 +951,7 @@ bun install
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: false,
+            is_package_json: false,
         };
         let style = CommentStyle {
             prefix: "#",
@@ -968,6 +969,7 @@ bun install
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: false,
+            is_package_json: false,
         };
         let style = CommentStyle {
             prefix: "#",
@@ -989,6 +991,7 @@ bun install
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: false,
+            is_package_json: false,
         };
         let style = CommentStyle {
             prefix: "#",
@@ -1005,6 +1008,7 @@ bun install
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: false,
+            is_package_json: false,
         };
         let style = CommentStyle {
             prefix: "#",
@@ -1024,6 +1028,7 @@ bun install
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: false,
+            is_package_json: false,
         };
         let style = CommentStyle {
             prefix: "#",
@@ -1041,6 +1046,7 @@ bun install
         let context = LintContext {
             bun_frozen_lockfile: false,
             is_markdown: false,
+            is_package_json: false,
         };
         let style = CommentStyle {
             prefix: "<!--",
