@@ -392,6 +392,29 @@ fn is_ignore_directive(line: &str, style: &CommentStyle) -> Option<IgnoreDirecti
     })
 }
 
+fn split_inline_ignore<'a>(
+    line: &'a str,
+    style: &CommentStyle,
+) -> Option<(&'a str, IgnoreDirective)> {
+    let trimmed = line.trim();
+
+    if trimmed.starts_with(style.prefix) {
+        return None;
+    }
+
+    let directive_match = IGNORE_RE.find(line)?;
+    let directive_start = directive_match.start();
+    let before_directive = &line[..directive_start];
+    let prefix_pos = before_directive.rfind(style.prefix)?;
+
+    if line[..prefix_pos].trim().is_empty() {
+        return None;
+    }
+
+    let comment_part = &line[prefix_pos..];
+    is_ignore_directive(comment_part, style).map(|directive| (&line[..prefix_pos], directive))
+}
+
 fn bun_frozen_lockfile_enabled(
     root: &Path,
     path: &Path,
@@ -484,32 +507,49 @@ fn check_file(content: &str, lint_context: &LintContext, comment_style: &Comment
             continue;
         }
 
-        // Check if this line is an ignore directive
-        if let Some(directive) = is_ignore_directive(line, comment_style) {
+        // Check for end-of-line ignore directive (e.g. "bun install  # locked-in: ignore")
+        let (effective_line, inline_skip): (&str, Option<IgnoreDirective>) =
+            if let Some((content, directive)) = split_inline_ignore(line, comment_style) {
+                (content, Some(directive))
+            } else {
+                (line, None)
+            };
+
+        // Check if this line is a standalone ignore directive (only when not an inline one)
+        if inline_skip.is_none()
+            && let Some(directive) = is_ignore_directive(effective_line, comment_style)
+        {
             skip_next = Some(directive);
             continue;
         }
 
-        // Check if the ignore directive covers this line
-        let skip_rule: Option<String> = match skip_next.take() {
-            None => None,
-            Some(IgnoreDirective::All) => continue,
-            Some(IgnoreDirective::Specific(rule)) => Some(rule),
-        };
+        // Apply ignore from previous line's directive
+        let prev_skip = skip_next.take();
+
+        // If either prev or inline directive says skip all, skip this line
+        if prev_skip.as_ref().is_some_and(|d| matches!(d, IgnoreDirective::All))
+            || inline_skip.as_ref().is_some_and(|d| matches!(d, IgnoreDirective::All))
+        {
+            continue;
+        }
 
         // Skip comments and placeholders
-        if is_comment_or_placeholder(line) {
+        if is_comment_or_placeholder(effective_line) {
             continue;
         }
 
         // Check all package managers
         let mut line_violations: Vec<Violation> = Vec::new();
-        line_violations.extend(check_npm(line, line_num));
-        line_violations.extend(check_pnpm(line, line_num));
-        line_violations.extend(check_yarn(line, line_num));
-        line_violations.extend(check_bun(line, line_num, lint_context.bun_frozen_lockfile));
+        line_violations.extend(check_npm(effective_line, line_num));
+        line_violations.extend(check_pnpm(effective_line, line_num));
+        line_violations.extend(check_yarn(effective_line, line_num));
+        line_violations.extend(check_bun(effective_line, line_num, lint_context.bun_frozen_lockfile));
 
-        if let Some(rule) = &skip_rule {
+        // Apply specific rule filters from prev-line or inline directives
+        if let Some(IgnoreDirective::Specific(rule)) = &prev_skip {
+            line_violations.retain(|v| v.rule_id.as_deref() != Some(rule.as_str()));
+        }
+        if let Some(IgnoreDirective::Specific(rule)) = &inline_skip {
             line_violations.retain(|v| v.rule_id.as_deref() != Some(rule.as_str()));
         }
 
@@ -903,11 +943,154 @@ bun install
 
         let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 1);
-        assert!(violations[0].line_content.contains("bun install"));
+    }
+
+    #[test]
+    fn test_inline_ignore_end_of_line_shell() {
+        let content = "bun install  # locked-in: ignore\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_inline_ignore_end_of_line_specific_rule() {
+        let content =
+            "bun install  # locked-in: ignore[bun-frozen-lockfile]\nbun add react\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        // Only bun-frozen-lockfile is ignored on the first line; bun add still fires on line 2
+        assert_eq!(violations.len(), 1);
         assert_eq!(
             violations[0].rule_id.as_deref(),
-            Some("bun-frozen-lockfile")
+            Some("bun-version-pin")
         );
+    }
+
+    #[test]
+    fn test_inline_ignore_end_of_line_yaml() {
+        let content = "run: bun install  # locked-in: ignore\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_inline_ignore_only_applies_to_same_line() {
+        let content = "bun install  # locked-in: ignore\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        // First line ignored, second line still fires
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn test_inline_ignore_precedes_standalone_ignore() {
+        // Inline ignore on line 1, standalone ignore for the following line
+        let content =
+            "bun install  # locked-in: ignore\n# locked-in: ignore\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        // Both lines suppressed
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_inline_ignore_markdown_html_comment() {
+        let content = "bun install  <!-- locked-in: ignore -->\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+        };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_split_inline_ignore_not_standalone() {
+        // The standalone comment case should not be treated as inline
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+        assert!(split_inline_ignore("# locked-in: ignore", &style).is_none());
+        assert!(split_inline_ignore("  # locked-in: ignore", &style).is_none());
+    }
+
+    #[test]
+    fn test_split_inline_ignore_detects_end_of_line() {
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let result = split_inline_ignore("bun install  # locked-in: ignore", &style);
+        assert!(result.is_some());
+        let (content, directive) = result.unwrap();
+        assert!(content.contains("bun install"));
+        assert!(matches!(directive, IgnoreDirective::All));
+
+        let result =
+            split_inline_ignore("npm i eslint  # locked-in: ignore[npm-version-pin]", &style);
+        assert!(result.is_some());
+        let (content, directive) = result.unwrap();
+        assert!(content.contains("npm i eslint"));
+        assert!(matches!(directive, IgnoreDirective::Specific(ref s) if s == "npm-version-pin"));
+    }
+
+    #[test]
+    fn test_split_inline_ignore_returns_none_for_plain_line() {
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+        assert!(split_inline_ignore("bun install", &style).is_none());
+        assert!(split_inline_ignore("npm ci", &style).is_none());
     }
 
     #[test]

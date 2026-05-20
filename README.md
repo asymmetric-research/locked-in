@@ -25,19 +25,26 @@ For stronger supply-chain hygiene, combine lockfiles and version pinning with pa
 
 ## Ignore Directives
 
-Add an inline comment on the line before a violation to suppress it per-file:
+Suppress violations with inline comments. Two placement styles are supported:
 
+**Previous-line** — comment on its own line suppresses the next line:
 ```
 # locked-in: ignore
+bun install
 ```
 
-This skips all checks on the next line. To suppress a specific rule, include the rule ID in brackets:
+**End-of-line** — comment at the end of the line suppresses that same line:
+```
+bun install  # locked-in: ignore
+```
 
+To suppress a specific rule, include the rule ID in brackets:
 ```
 # locked-in: ignore[yarn-frozen-lockfile]
+npm i eslint  # locked-in: ignore[npm-version-pin]
 ```
 
-The comment style is extension-aware: `#` for shell, YAML, Makefile, and Dockerfile; `<!-- locked-in: ignore -->` for Markdown.
+The comment syntax is extension-aware: `#` for shell, YAML, Makefile, and Dockerfile; `<!-- locked-in: ignore -->` for Markdown.
 
 **Available rule IDs:**
 
