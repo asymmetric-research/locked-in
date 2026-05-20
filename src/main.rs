@@ -36,7 +36,21 @@ struct Violation {
     line_num: usize,
     message: String,
     line_content: String,
+    rule_id: Option<String>,
 }
+
+struct CommentStyle {
+    prefix: &'static str,
+    suffix: &'static str,
+}
+
+enum IgnoreDirective {
+    All,
+    Specific(String),
+}
+
+static IGNORE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"locked-in:\s*ignore(?:\s*\[([^\]]*)\])?").unwrap());
 
 struct LintResult {
     violations_found: usize,
@@ -147,6 +161,7 @@ fn lint_file(
     bun_context_cache: &Mutex<HashMap<PathBuf, bool>>,
 ) -> Option<FileLintResult> {
     let source = fs::read_to_string(path).ok()?;
+    let comment_style = comment_style_for_file(path)?;
     let context = LintContext {
         bun_frozen_lockfile: bun_frozen_lockfile_enabled(root, path, bun_context_cache),
         is_markdown: has_extension(path, "md"),
@@ -155,7 +170,7 @@ fn lint_file(
 
     Some(FileLintResult {
         path: path.to_path_buf(),
-        violations: check_file(&source, &context),
+        violations: check_file(&source, &context, &comment_style),
     })
 }
 
@@ -304,6 +319,102 @@ fn is_makefile(file_name: &str) -> bool {
         || has_extension(Path::new(file_name), "mk")
 }
 
+fn comment_style_for_file(path: &Path) -> Option<CommentStyle> {
+    if has_extension(path, "md") {
+        return Some(CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        });
+    }
+
+    if is_shell_file(path) || is_makefile(path.file_name().and_then(|n| n.to_str()).unwrap_or(""))
+    {
+        return Some(CommentStyle {
+            prefix: "#",
+            suffix: "",
+        });
+    }
+
+    if has_extension(path, "yml") || has_extension(path, "yaml") {
+        return Some(CommentStyle {
+            prefix: "#",
+            suffix: "",
+        });
+    }
+
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    if file_name.starts_with("Dockerfile") || file_name.ends_with(".dockerfile") {
+        return Some(CommentStyle {
+            prefix: "#",
+            suffix: "",
+        });
+    }
+
+    None
+}
+
+fn is_ignore_directive(line: &str, style: &CommentStyle) -> Option<IgnoreDirective> {
+    let trimmed = line.trim();
+
+    if !trimmed.starts_with(style.prefix) {
+        return None;
+    }
+
+    if !style.suffix.is_empty() && !trimmed.ends_with(style.suffix) {
+        return None;
+    }
+
+    let inner = trimmed
+        .strip_prefix(style.prefix)
+        .and_then(|rest| {
+            if style.suffix.is_empty() {
+                Some(rest.trim())
+            } else if let Some(stripped) = rest.strip_suffix(style.suffix) {
+                Some(stripped.trim())
+            } else {
+                None
+            }
+        });
+
+    inner.and_then(|content| {
+        IGNORE_RE.find(content).map(|m| {
+            let caps = IGNORE_RE.captures(m.as_str());
+            caps.and_then(|c| c.get(1)).map_or(IgnoreDirective::All, |rule_match| {
+                let rule = rule_match.as_str().trim();
+                if rule.is_empty() {
+                    IgnoreDirective::All
+                } else {
+                    IgnoreDirective::Specific(rule.to_string())
+                }
+            })
+        })
+    })
+}
+
+fn split_inline_ignore<'a>(
+    line: &'a str,
+    style: &CommentStyle,
+) -> Option<(&'a str, IgnoreDirective)> {
+    let trimmed = line.trim();
+
+    if trimmed.starts_with(style.prefix) {
+        return None;
+    }
+
+    let directive_match = IGNORE_RE.find(line)?;
+    let directive_start = directive_match.start();
+    let before_directive = &line[..directive_start];
+    let prefix_pos = before_directive.rfind(style.prefix)?;
+
+    if line[..prefix_pos].trim().is_empty() {
+        return None;
+    }
+
+    let comment_part = &line[prefix_pos..];
+    is_ignore_directive(comment_part, style).map(|directive| (&line[..prefix_pos], directive))
+}
+
 fn bun_frozen_lockfile_enabled(
     root: &Path,
     path: &Path,
@@ -367,7 +478,7 @@ fn bunfig_has_frozen_lockfile(content: &str) -> bool {
     false
 }
 
-fn check_file(content: &str, lint_context: &LintContext) -> Vec<Violation> {
+fn check_file(content: &str, lint_context: &LintContext, comment_style: &CommentStyle) -> Vec<Violation> {
     if lint_context.is_package_json {
         return check_package_json(content, lint_context);
     }
@@ -375,6 +486,7 @@ fn check_file(content: &str, lint_context: &LintContext) -> Vec<Violation> {
     let mut violations = Vec::new();
     let mut in_code_block = false;
     let mut lint_code_block = false;
+    let mut skip_next: Option<IgnoreDirective> = None;
 
     for (line_num, line) in content.lines().enumerate() {
         let line_num = line_num.saturating_add(1); // 1-indexed
@@ -395,16 +507,53 @@ fn check_file(content: &str, lint_context: &LintContext) -> Vec<Violation> {
             continue;
         }
 
+        // Check for end-of-line ignore directive (e.g. "bun install  # locked-in: ignore")
+        let (effective_line, inline_skip): (&str, Option<IgnoreDirective>) =
+            if let Some((content, directive)) = split_inline_ignore(line, comment_style) {
+                (content, Some(directive))
+            } else {
+                (line, None)
+            };
+
+        // Check if this line is a standalone ignore directive (only when not an inline one)
+        if inline_skip.is_none()
+            && let Some(directive) = is_ignore_directive(effective_line, comment_style)
+        {
+            skip_next = Some(directive);
+            continue;
+        }
+
+        // Apply ignore from previous line's directive
+        let prev_skip = skip_next.take();
+
+        // If either prev or inline directive says skip all, skip this line
+        if prev_skip.as_ref().is_some_and(|d| matches!(d, IgnoreDirective::All))
+            || inline_skip.as_ref().is_some_and(|d| matches!(d, IgnoreDirective::All))
+        {
+            continue;
+        }
+
         // Skip comments and placeholders
-        if is_comment_or_placeholder(line) {
+        if is_comment_or_placeholder(effective_line) {
             continue;
         }
 
         // Check all package managers
-        violations.extend(check_npm(line, line_num));
-        violations.extend(check_pnpm(line, line_num));
-        violations.extend(check_yarn(line, line_num));
-        violations.extend(check_bun(line, line_num, lint_context.bun_frozen_lockfile));
+        let mut line_violations: Vec<Violation> = Vec::new();
+        line_violations.extend(check_npm(effective_line, line_num));
+        line_violations.extend(check_pnpm(effective_line, line_num));
+        line_violations.extend(check_yarn(effective_line, line_num));
+        line_violations.extend(check_bun(effective_line, line_num, lint_context.bun_frozen_lockfile));
+
+        // Apply specific rule filters from prev-line or inline directives
+        if let Some(IgnoreDirective::Specific(rule)) = &prev_skip {
+            line_violations.retain(|v| v.rule_id.as_deref() != Some(rule.as_str()));
+        }
+        if let Some(IgnoreDirective::Specific(rule)) = &inline_skip {
+            line_violations.retain(|v| v.rule_id.as_deref() != Some(rule.as_str()));
+        }
+
+        violations.extend(line_violations);
     }
 
     violations
@@ -502,6 +651,7 @@ fn check_npm(line: &str, line_num: usize) -> Vec<Violation> {
                 message: "Use 'npm ci' instead of 'npm install' for lockfile-based installations"
                     .to_string(),
                 line_content: line.trim().to_string(),
+                rule_id: Some("npm-install-bare".to_string()),
             });
         } else {
             violations.push(Violation {
@@ -510,6 +660,7 @@ fn check_npm(line: &str, line_num: usize) -> Vec<Violation> {
                     "npm package installation without version pin (use 'npm i package@version')"
                         .to_string(),
                 line_content: line.trim().to_string(),
+                rule_id: Some("npm-version-pin".to_string()),
             });
         }
     }
@@ -526,6 +677,7 @@ fn check_pnpm(line: &str, line_num: usize) -> Vec<Violation> {
             line_num,
             message: "Use 'pnpm install --frozen-lockfile' to respect lockfile".to_string(),
             line_content: line.trim().to_string(),
+            rule_id: Some("pnpm-frozen-lockfile".to_string()),
         });
     }
 
@@ -537,6 +689,7 @@ fn check_pnpm(line: &str, line_num: usize) -> Vec<Violation> {
                 "pnpm package installation without version pin (use 'pnpm add package@version')"
                     .to_string(),
             line_content: line.trim().to_string(),
+            rule_id: Some("pnpm-version-pin".to_string()),
         });
     }
 
@@ -552,6 +705,7 @@ fn check_yarn(line: &str, line_num: usize) -> Vec<Violation> {
             line_num,
             message: "Use 'yarn install --frozen-lockfile' to respect lockfile".to_string(),
             line_content: line.trim().to_string(),
+            rule_id: Some("yarn-frozen-lockfile".to_string()),
         });
     }
 
@@ -563,6 +717,7 @@ fn check_yarn(line: &str, line_num: usize) -> Vec<Violation> {
                 "yarn package installation without version pin (use 'yarn add package@version')"
                     .to_string(),
             line_content: line.trim().to_string(),
+            rule_id: Some("yarn-version-pin".to_string()),
         });
     }
 
@@ -581,6 +736,7 @@ fn check_bun(line: &str, line_num: usize, bun_frozen_lockfile: bool) -> Vec<Viol
                 line_num,
                 message: "Use 'bun install --frozen-lockfile' unless repo-local bunfig.toml sets '[install].frozenLockfile = true' (https://bun.com/docs/runtime/bunfig#install-frozenlockfile)".to_string(),
                 line_content: line.trim().to_string(),
+                rule_id: Some("bun-frozen-lockfile".to_string()),
             });
     }
 
@@ -591,6 +747,7 @@ fn check_bun(line: &str, line_num: usize, bun_frozen_lockfile: bool) -> Vec<Viol
             message: "bun package installation without version pin (use 'bun add package@version')"
                 .to_string(),
             line_content: line.trim().to_string(),
+            rule_id: Some("bun-version-pin".to_string()),
         });
     }
 
@@ -779,10 +936,167 @@ bun install
             is_markdown: true,
             is_package_json: false,
         };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
 
-        let violations = check_file(content, &context);
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 1);
-        assert!(violations[0].line_content.contains("bun install"));
+    }
+
+    #[test]
+    fn test_inline_ignore_end_of_line_shell() {
+        let content = "bun install  # locked-in: ignore\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_inline_ignore_end_of_line_specific_rule() {
+        let content =
+            "bun install  # locked-in: ignore[bun-frozen-lockfile]\nbun add react\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        // Only bun-frozen-lockfile is ignored on the first line; bun add still fires on line 2
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].rule_id.as_deref(),
+            Some("bun-version-pin")
+        );
+    }
+
+    #[test]
+    fn test_inline_ignore_end_of_line_yaml() {
+        let content = "run: bun install  # locked-in: ignore\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_inline_ignore_only_applies_to_same_line() {
+        let content = "bun install  # locked-in: ignore\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        // First line ignored, second line still fires
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn test_inline_ignore_precedes_standalone_ignore() {
+        // Inline ignore on line 1, standalone ignore for the following line
+        let content =
+            "bun install  # locked-in: ignore\n# locked-in: ignore\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        // Both lines suppressed
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_inline_ignore_markdown_html_comment() {
+        let content = "bun install  <!-- locked-in: ignore -->\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_split_inline_ignore_not_standalone() {
+        // The standalone comment case should not be treated as inline
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+        assert!(split_inline_ignore("# locked-in: ignore", &style).is_none());
+        assert!(split_inline_ignore("  # locked-in: ignore", &style).is_none());
+    }
+
+    #[test]
+    fn test_split_inline_ignore_detects_end_of_line() {
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let result = split_inline_ignore("bun install  # locked-in: ignore", &style);
+        assert!(result.is_some());
+        let (content, directive) = result.unwrap();
+        assert!(content.contains("bun install"));
+        assert!(matches!(directive, IgnoreDirective::All));
+
+        let result =
+            split_inline_ignore("npm i eslint  # locked-in: ignore[npm-version-pin]", &style);
+        assert!(result.is_some());
+        let (content, directive) = result.unwrap();
+        assert!(content.contains("npm i eslint"));
+        assert!(matches!(directive, IgnoreDirective::Specific(ref s) if s == "npm-version-pin"));
+    }
+
+    #[test]
+    fn test_split_inline_ignore_returns_none_for_plain_line() {
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+        assert!(split_inline_ignore("bun install", &style).is_none());
+        assert!(split_inline_ignore("npm ci", &style).is_none());
     }
 
     #[test]
@@ -799,8 +1113,12 @@ bun install
             is_markdown: true,
             is_package_json: false,
         };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
 
-        let violations = check_file(content, &context);
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 0);
     }
 
@@ -819,8 +1137,12 @@ Done in 1.2s
             is_markdown: true,
             is_package_json: false,
         };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
 
-        let violations = check_file(content, &context);
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 0);
     }
 
@@ -837,8 +1159,12 @@ Done in 1.2s
             is_markdown: true,
             is_package_json: false,
         };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
 
-        let violations = check_file(content, &context);
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 0);
     }
 
@@ -856,8 +1182,12 @@ $ bun install
             is_markdown: true,
             is_package_json: false,
         };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
 
-        let violations = check_file(content, &context);
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 1);
     }
 
@@ -876,8 +1206,12 @@ bun add react@18.2.0
             is_markdown: true,
             is_package_json: false,
         };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
 
-        let violations = check_file(content, &context);
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 0);
     }
 
@@ -897,8 +1231,12 @@ bun add react@18.2.0
             is_markdown: true,
             is_package_json: false,
         };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
 
-        let violations = check_file(content, &context);
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 0);
     }
 
@@ -914,8 +1252,12 @@ fi
             is_markdown: false,
             is_package_json: false,
         };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
 
-        let violations = check_file(content, &context);
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 1);
     }
 
@@ -1161,6 +1503,13 @@ fi
         }
     }
 
+    fn shell_comment_style() -> CommentStyle {
+        CommentStyle {
+            prefix: "#",
+            suffix: "",
+        }
+    }
+
     #[test]
     fn test_package_json_npm_install_violation() {
         let content = r#"{
@@ -1169,7 +1518,7 @@ fi
     "setup": "npm install"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("npm ci"));
         assert_eq!(violations[0].line_num, 4);
@@ -1182,7 +1531,7 @@ fi
     "ci": "npm ci"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
         assert_eq!(violations.len(), 0);
     }
 
@@ -1193,7 +1542,7 @@ fi
     "bootstrap": "yarn install"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("frozen-lockfile"));
     }
@@ -1205,7 +1554,7 @@ fi
     "bootstrap": "yarn install --frozen-lockfile"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
         assert_eq!(violations.len(), 0);
     }
 
@@ -1216,7 +1565,7 @@ fi
     "bootstrap": "pnpm install"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("frozen-lockfile"));
     }
@@ -1228,7 +1577,7 @@ fi
     "bootstrap": "bun install"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("bunfig.toml"));
     }
@@ -1245,7 +1594,7 @@ fi
             is_markdown: false,
             is_package_json: true,
         };
-        let violations = check_file(content, &context);
+        let violations = check_file(content, &context, &shell_comment_style());
         assert_eq!(violations.len(), 0);
     }
 
@@ -1256,7 +1605,7 @@ fi
     "build": "npm install && tsc"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("npm ci"));
     }
@@ -1268,7 +1617,7 @@ fi
     "add-dep": "yarn add react"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
         assert_eq!(violations.len(), 1);
         assert!(violations[0].message.contains("version pin"));
     }
@@ -1280,7 +1629,99 @@ fi
     "add-dep": "yarn add react@18.2.0"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
+        assert_eq!(violations.len(), 0);
+    }
+
+    // ===== Ignore Directive Tests =====
+
+    #[test]
+    fn test_ignore_directive_skips_next_line_shell() {
+        let content = "# locked-in: ignore\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_ignore_directive_with_specific_rule() {
+        let content = "# locked-in: ignore[bun-frozen-lockfile]\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_ignore_specific_rule_only_skips_that_rule() {
+        // bun add should still be caught, only bun install is ignored
+        let content = "# locked-in: ignore[bun-frozen-lockfile]\nbun install\nbun add react\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].rule_id.as_deref(),
+            Some("bun-version-pin")
+        );
+    }
+
+    #[test]
+    fn test_ignore_directive_only_applies_to_next_line() {
+        let content = "# locked-in: ignore\nbun install\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn test_ignore_directive_with_whitespace_variations() {
+        let content = "  # locked-in: ignore\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 0);
     }
 
@@ -1295,7 +1736,24 @@ fi
     "ci": "npm ci"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_ignore_directive_with_whitespace_in_brackets() {
+        let content = "# locked-in: ignore[ bun-frozen-lockfile ]\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 0);
     }
 
@@ -1305,14 +1763,78 @@ fi
   "name": "demo",
   "version": "1.0.0"
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_ignore_directive_markdown_html_comment() {
+        let content = r#"<!-- locked-in: ignore -->
+```bash
+bun install
+```
+"#;
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: true,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
+
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 0);
     }
 
     #[test]
     fn test_package_json_invalid_json_ignored() {
         let content = "{ not valid json";
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_ignore_directive_markdown_specific_rule() {
+        let content = r#"<!-- locked-in: ignore[bun-frozen-lockfile] -->
+```bash
+bun install
+bun add react
+```
+"#;
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: true,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].rule_id.as_deref(),
+            Some("bun-version-pin")
+        );
+    }
+
+    #[test]
+    fn test_ignore_directive_yarn_respect_lockfile() {
+        let content = "# locked-in: ignore[yarn-frozen-lockfile]\nyarn install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
         assert_eq!(violations.len(), 0);
     }
 
@@ -1325,7 +1847,236 @@ fi
     "c": "pnpm install"
   }
 }"#;
-        let violations = check_file(content, &package_json_context());
+        let violations = check_file(content, &package_json_context(), &shell_comment_style());
         assert_eq!(violations.len(), 3);
+    }
+
+    #[test]
+    fn test_ignore_directive_npm_install_bare() {
+        let content = "# locked-in: ignore[npm-install-bare]\nnpm install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_ignore_directive_npm_install_version_pin() {
+        let content =
+            "# locked-in: ignore[npm-version-pin]\nnpm i eslint\nnpm install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        // Only npm-version-pin is ignored on the first line; bare npm install still fires on line 3
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].rule_id.as_deref(),
+            Some("npm-install-bare")
+        );
+    }
+
+    #[test]
+    fn test_ignore_directive_yaml() {
+        let content = r#"
+- name: Install
+  # locked-in: ignore
+  run: bun install
+"#;
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_ignore_directive_not_a_comment_is_not_parsed() {
+        // A non-comment line containing "locked-in: ignore" should not be treated as a directive
+        let content = "echo locked-in: ignore\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn test_ignore_directive_pnpm_frozen_lockfile() {
+        let content =
+            "# locked-in: ignore[pnpm-frozen-lockfile]\npnpm install\npnpm add react\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].rule_id.as_deref(),
+            Some("pnpm-version-pin")
+        );
+    }
+
+    #[test]
+    fn test_ignore_directive_pnpm_version_pin() {
+        let content =
+            "# locked-in: ignore[pnpm-version-pin]\npnpm add react\npnpm install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].rule_id.as_deref(),
+            Some("pnpm-frozen-lockfile")
+        );
+    }
+
+    #[test]
+    fn test_ignore_directive_yarn_version_pin() {
+        let content =
+            "# locked-in: ignore[yarn-version-pin]\nyarn add react\nyarn install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].rule_id.as_deref(),
+            Some("yarn-frozen-lockfile")
+        );
+    }
+
+    #[test]
+    fn test_ignore_directive_bun_version_pin() {
+        let content =
+            "# locked-in: ignore[bun-version-pin]\nbun add react\nbun install\n";
+        let context = LintContext {
+            bun_frozen_lockfile: false,
+            is_markdown: false,
+            is_package_json: false,
+        };
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        let violations = check_file(content, &context, &style);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(
+            violations[0].rule_id.as_deref(),
+            Some("bun-frozen-lockfile")
+        );
+    }
+
+    #[test]
+    fn test_is_ignore_directive_shell() {
+        let style = CommentStyle {
+            prefix: "#",
+            suffix: "",
+        };
+
+        assert!(matches!(
+            is_ignore_directive("# locked-in: ignore", &style),
+            Some(IgnoreDirective::All)
+        ));
+        assert!(matches!(
+            is_ignore_directive("# locked-in: ignore[yarn-frozen-lockfile]", &style),
+            Some(IgnoreDirective::Specific(ref s)) if s == "yarn-frozen-lockfile"
+        ));
+        assert!(matches!(
+            is_ignore_directive("  # locked-in: ignore", &style),
+            Some(IgnoreDirective::All)
+        ));
+        assert!(is_ignore_directive("# not an ignore", &style).is_none());
+        assert!(is_ignore_directive("bun install", &style).is_none());
+    }
+
+    #[test]
+    fn test_is_ignore_directive_markdown() {
+        let style = CommentStyle {
+            prefix: "<!--",
+            suffix: "-->",
+        };
+
+        assert!(matches!(
+            is_ignore_directive("<!-- locked-in: ignore -->", &style),
+            Some(IgnoreDirective::All)
+        ));
+        assert!(matches!(
+            is_ignore_directive("<!-- locked-in: ignore[bun-frozen-lockfile] -->", &style),
+            Some(IgnoreDirective::Specific(ref s)) if s == "bun-frozen-lockfile"
+        ));
+        assert!(matches!(
+            is_ignore_directive("  <!-- locked-in: ignore -->  ", &style),
+            Some(IgnoreDirective::All)
+        ));
+        assert!(is_ignore_directive("<!-- regular comment -->", &style).is_none());
+    }
+
+    #[test]
+    fn test_comment_style_for_file() {
+        assert!(comment_style_for_file(Path::new("script.sh")).is_some());
+        assert!(comment_style_for_file(Path::new("README.md")).is_some());
+        assert!(comment_style_for_file(Path::new(".github/workflows/ci.yml")).is_some());
+        assert!(comment_style_for_file(Path::new("Dockerfile")).is_some());
+        assert!(comment_style_for_file(Path::new("Makefile")).is_some());
+
+        let sh_style = comment_style_for_file(Path::new("script.sh")).unwrap();
+        assert_eq!(sh_style.prefix, "#");
+        assert_eq!(sh_style.suffix, "");
+
+        let md_style = comment_style_for_file(Path::new("README.md")).unwrap();
+        assert_eq!(md_style.prefix, "<!--");
+        assert_eq!(md_style.suffix, "-->");
     }
 }
