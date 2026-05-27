@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ecosystem {
@@ -50,4 +50,18 @@ pub fn expected_lockfiles_for_manifest(path: &Path) -> Option<&'static LockfileE
     EXPECTATIONS
         .iter()
         .find(|expectation| expectation.manifests.contains(&file_name))
+}
+
+#[must_use]
+pub fn expected_lockfile_paths(path: &Path) -> Option<Vec<PathBuf>> {
+    let expectation = expected_lockfiles_for_manifest(path)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+
+    Some(
+        expectation
+            .lockfiles
+            .iter()
+            .map(|lockfile| parent.join(lockfile))
+            .collect(),
+    )
 }

@@ -12,23 +12,21 @@ pub fn check_pnpm(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
     if PNPM_INSTALL_RE.is_match(line) && !line.contains("--frozen-lockfile") {
-        violations.push(Violation {
+        violations.push(Violation::error(
             line_num,
-            message: "Use 'pnpm install --frozen-lockfile' to respect lockfile".to_string(),
-            line_content: line.trim().to_string(),
-            rule_id: Some("pnpm-frozen-lockfile".to_string()),
-        });
+            "Use 'pnpm install --frozen-lockfile' to respect lockfile",
+            line.trim(),
+            "pnpm-frozen-lockfile",
+        ));
     }
 
     if PNPM_ADD_RE.is_match(line) && !has_version_pin(line) {
-        violations.push(Violation {
+        violations.push(Violation::error(
             line_num,
-            message:
-                "pnpm package installation without version pin (use 'pnpm add package@version')"
-                    .to_string(),
-            line_content: line.trim().to_string(),
-            rule_id: Some("pnpm-version-pin".to_string()),
-        });
+            "pnpm package installation without version pin (use 'pnpm add package@version')",
+            line.trim(),
+            "pnpm-version-pin",
+        ));
     }
 
     violations

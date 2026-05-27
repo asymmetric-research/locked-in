@@ -58,6 +58,20 @@ The comment syntax is extension-aware: `#` for shell, YAML, Makefile, and Docker
 | `yarn-version-pin` | `yarn add` without `@version` |
 | `bun-frozen-lockfile` | `bun install` without `--frozen-lockfile` or config |
 | `bun-version-pin` | `bun add` without `@version` |
+| `missing-tracked-lockfile` | tracked manifest without a tracked sibling lockfile |
+| `git-metadata-unavailable` | warning when git metadata is unavailable for tracked lockfile validation |
+
+## Tracked Lockfiles
+
+`locked-in` reads `.git/index` to verify tracked manifests have tracked sibling lockfiles. A lockfile that exists only in the working tree does not satisfy this rule; it must be checked into git.
+
+Supported manifest pairs:
+
+- `package.json` → `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb`, or `bun.lock`
+- `Cargo.toml` → `Cargo.lock`
+- `go.mod` → `go.sum`
+
+If git metadata is unavailable, tracked lockfile validation is skipped with a warning and does not fail the run.
 
 ## Scanned Files
 

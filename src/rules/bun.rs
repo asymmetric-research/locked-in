@@ -13,22 +13,21 @@ pub fn check_bun(line: &str, line_num: usize, bun_frozen_lockfile: bool) -> Vec<
 
     if BUN_INSTALL_RE.is_match(line) && !line.contains("--frozen-lockfile") && !bun_frozen_lockfile
     {
-        violations.push(Violation {
-                line_num,
-                message: "Use 'bun install --frozen-lockfile' unless repo-local bunfig.toml sets '[install].frozenLockfile = true' (https://bun.com/docs/runtime/bunfig#install-frozenlockfile)".to_string(),
-                line_content: line.trim().to_string(),
-                rule_id: Some("bun-frozen-lockfile".to_string()),
-            });
+        violations.push(Violation::error(
+            line_num,
+            "Use 'bun install --frozen-lockfile' unless repo-local bunfig.toml sets '[install].frozenLockfile = true' (https://bun.com/docs/runtime/bunfig#install-frozenlockfile)",
+            line.trim(),
+            "bun-frozen-lockfile",
+        ));
     }
 
     if BUN_ADD_RE.is_match(line) && !has_version_pin(line) {
-        violations.push(Violation {
+        violations.push(Violation::error(
             line_num,
-            message: "bun package installation without version pin (use 'bun add package@version')"
-                .to_string(),
-            line_content: line.trim().to_string(),
-            rule_id: Some("bun-version-pin".to_string()),
-        });
+            "bun package installation without version pin (use 'bun add package@version')",
+            line.trim(),
+            "bun-version-pin",
+        ));
     }
 
     violations
