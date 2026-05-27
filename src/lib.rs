@@ -280,7 +280,50 @@ bun install
         let result = crate::lint_files(&root);
 
         fs::remove_dir_all(root).unwrap();
-        assert_eq!(result.violations_found, 1);
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 1);
+    }
+
+    #[test]
+    fn cargo_workspace_members_use_workspace_lockfile() {
+        let root = temp_repo("cargo-workspace-lockfile");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("crates/app")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/app\"]\n",
+        )
+        .unwrap();
+        fs::write(root.join("Cargo.lock"), "").unwrap();
+        fs::write(
+            root.join("crates/app/Cargo.toml"),
+            "[package]\nname = \"app\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["Cargo.toml", "Cargo.lock", "crates/app/Cargo.toml"]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 0);
+    }
+
+    #[test]
+    fn go_mod_without_requirements_does_not_need_go_sum() {
+        let root = temp_repo("go-mod-no-sum");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("go.mod"), "module example.com/app\n\ngo 1.22\n").unwrap();
+        fs::write(root.join(".git/index"), git_index_with_paths(&["go.mod"])).unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
         assert_eq!(result.warnings_found, 0);
     }
 
