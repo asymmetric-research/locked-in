@@ -1,8 +1,10 @@
 # locked-in
 
-Lints JavaScript package manager commands (npm, pnpm, yarn, bun) to enforce version pinning and lockfile usage.
+`locked-in` enforces version pinning, lockfile usage, and tracked-lockfile hygiene across JavaScript (npm, pnpm, yarn, bun), Cargo, and Go projects. It is **opinionated toward supply-chain security**: when in doubt, it errs on the conservative side.
 
-For stronger supply-chain hygiene, combine lockfiles and version pinning with package-manager dependency cooldowns (minimum release age), which reduce risk from newly published malicious packages.
+It also warns when a tracked manifest exists without a corresponding lockfile tracked in the git index, so a lockfile present only in the working tree does not count.
+
+For defense in depth, combine lockfiles and version pinning with package-manager dependency cooldowns (minimum release age), which reduce risk from newly published malicious packages.
 
 ## Rules
 
@@ -71,7 +73,8 @@ Supported manifest pairs:
 - `Cargo.toml` → `Cargo.lock`
 - `go.mod` → `go.sum`
 
-Cargo workspace members may use a tracked `Cargo.lock` from an ancestor workspace root. Go modules without `require` directives do not require `go.sum`.
+Cargo workspace members may use a tracked `Cargo.lock` from an ancestor workspace root (members never have individual lockfiles — that is Cargo workspace semantics). The workspace root's `Cargo.lock` should be committed: the Cargo Book [recommends](https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control) checking it in ("when in doubt, check `Cargo.lock` into the version control system"), and from a supply-chain perspective it provides the same deterministic, auditable dependency snapshot that every other lockfile does, regardless of whether the crate is a library or binary.
+Go modules without `require` directives do not require `go.sum`.
 
 If git metadata is unavailable, tracked lockfile validation is skipped with a warning and does not fail the run.
 
@@ -90,32 +93,52 @@ Scanning respects `.gitignore` and skips common generated/vendor directories suc
 
 ### GitHub Action
 
+The following is an example GitHub Action config that can be used to configure `locked-in`. 
+It's recommended to keep this up-to-date with the latest releases on this repo. (And to verify it independently via [zizmor](https://github.com/zizmorcore/zizmor).)
+
 ```yaml
 name: Lint Package Installs
 
-on: [push, pull_request]
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   locked-in:
     runs-on: ubuntu-latest
+    env:
+      # Note: check recent releases and update these values.
+      LOCKED_IN_COMMIT: 74d8fd31d519ea9f4f95b01191dc6171df90f045 # v0.2.0
     steps:
-      - uses: actions/checkout@v4
-      - uses: asymmetric-research/locked-in@main
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install locked-in from pinned source
+        run: cargo install --locked --git https://github.com/asymmetric-research/locked-in --rev "$LOCKED_IN_COMMIT" locked-in
+      - name: Run locked-in
+        run: locked-in .
 ```
 
-To pin to a specific commit:
+This pattern is recommended over floating refs such as `uses: asymmetric-research/locked-in@main` or `cargo install --git ...` without `--rev`: 
+it pins both `actions/checkout` and `locked-in` to immutable commits, disables persisted checkout credentials, and keeps 
+Cargo dependency resolution locked to the repository's `Cargo.lock`.
 
-```yaml
-      - uses: asymmetric-research/locked-in@main
-        with:
-          commit: abc123f  # specific commit SHA
+If you prefer inline values instead of an environment variable, pin `--rev` directly:
+
+```bash
+cargo install --locked --git https://github.com/asymmetric-research/locked-in --rev 74d8fd31d519ea9f4f95b01191dc6171df90f045 locked-in
 ```
 
 ### CLI
 
 ```bash
-# Install
-cargo install --git https://github.com/asymmetric-research/locked-in
+# Install from a pinned commit. This example refers to locked-in v0.2.0
+cargo install --locked --git https://github.com/asymmetric-research/locked-in --rev 74d8fd31d519ea9f4f95b01191dc6171df90f045 locked-in
 
 # Run
 locked-in
