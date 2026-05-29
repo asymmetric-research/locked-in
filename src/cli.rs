@@ -46,6 +46,12 @@ where
 
     if result.violations_found == 0 {
         println!("{}", "✓ No violations found!".green());
+        if result.warnings_found > 0 {
+            println!(
+                "{}",
+                format!("Warnings: {}", result.warnings_found).yellow()
+            );
+        }
         println!(
             "{}",
             format!("Files checked: {}", result.files_checked).blue()
@@ -55,8 +61,8 @@ where
         println!(
             "{}",
             format!(
-                "✗ Found {} violation(s) in {} files",
-                result.violations_found, result.files_checked
+                "✗ Found {} violation(s) and {} warning(s) in {} files",
+                result.violations_found, result.warnings_found, result.files_checked
             )
             .red()
         );

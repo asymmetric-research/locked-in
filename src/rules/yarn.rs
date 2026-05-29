@@ -15,23 +15,21 @@ pub fn check_yarn(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
     if YARN_INSTALL_RE.is_match(line) && !YARN_FROZEN_RE.is_match(line) {
-        violations.push(Violation {
+        violations.push(Violation::error(
             line_num,
-            message: "Use 'yarn install --frozen-lockfile' to respect lockfile".to_string(),
-            line_content: line.trim().to_string(),
-            rule_id: Some("yarn-frozen-lockfile".to_string()),
-        });
+            "Use 'yarn install --frozen-lockfile' to respect lockfile",
+            line.trim(),
+            "yarn-frozen-lockfile",
+        ));
     }
 
     if YARN_ADD_RE.is_match(line) && !has_version_pin(line) {
-        violations.push(Violation {
+        violations.push(Violation::error(
             line_num,
-            message:
-                "yarn package installation without version pin (use 'yarn add package@version')"
-                    .to_string(),
-            line_content: line.trim().to_string(),
-            rule_id: Some("yarn-version-pin".to_string()),
-        });
+            "yarn package installation without version pin (use 'yarn add package@version')",
+            line.trim(),
+            "yarn-version-pin",
+        ));
     }
 
     violations

@@ -22,22 +22,19 @@ pub fn check_npm(line: &str, line_num: usize) -> Vec<Violation> {
         }
 
         if BARE_NPM_INSTALL_RE.is_match(line) {
-            violations.push(Violation {
+            violations.push(Violation::error(
                 line_num,
-                message: "Use 'npm ci' instead of 'npm install' for lockfile-based installations"
-                    .to_string(),
-                line_content: line.trim().to_string(),
-                rule_id: Some("npm-install-bare".to_string()),
-            });
+                "Use 'npm ci' instead of 'npm install' for lockfile-based installations",
+                line.trim(),
+                "npm-install-bare",
+            ));
         } else {
-            violations.push(Violation {
+            violations.push(Violation::error(
                 line_num,
-                message:
-                    "npm package installation without version pin (use 'npm i package@version')"
-                        .to_string(),
-                line_content: line.trim().to_string(),
-                rule_id: Some("npm-version-pin".to_string()),
-            });
+                "npm package installation without version pin (use 'npm i package@version')",
+                line.trim(),
+                "npm-version-pin",
+            ));
         }
     }
 

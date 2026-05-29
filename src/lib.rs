@@ -8,7 +8,7 @@ mod report;
 mod rules;
 mod scanner;
 
-pub use diagnostic::{FileLintResult, LintResult, Violation};
+pub use diagnostic::{FileLintResult, LintResult, Severity, Violation};
 pub use scanner::lint_files;
 
 #[cfg(test)]
@@ -16,8 +16,9 @@ mod tests {
     use crate::context::bun::{bun_frozen_lockfile_enabled, bunfig_has_frozen_lockfile};
     use crate::context::git::{
         SubmodulePruner, gitdir_target_is_submodule, parse_gitdir_target_from_content,
-        parse_gitmodules_paths_from_content,
+        parse_gitmodules_paths_from_content, parse_tracked_paths_from_index,
     };
+    use crate::context::lockfiles::expected_lockfile_paths;
     use crate::file_types::{
         comment_style_for_file, is_excluded, is_package_json, should_check_file,
     };
@@ -29,8 +30,10 @@ mod tests {
     };
     use crate::rules::{check_bun, check_npm, check_pnpm, check_yarn};
     use std::collections::HashMap;
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn context(
         is_markdown: bool,
@@ -146,7 +149,7 @@ mod tests {
 
     #[test]
     fn markdown_lints_only_shell_code_blocks() {
-        let content = r#"
+        let content = r"
 ```bash
 bun install
 ```
@@ -154,7 +157,7 @@ bun install
 ```
 bun install
 ```
-"#;
+";
         let style = CommentStyle {
             prefix: "<!--",
             suffix: "-->",
@@ -232,5 +235,138 @@ bun install
         };
         assert!(pruner.is_declared_submodule_path(Path::new("/repo/deps/foo")));
         assert!(!pruner.is_declared_submodule_path(Path::new("/repo/deps/foo/src")));
+    }
+
+    #[test]
+    fn git_index_parser_extracts_tracked_paths() {
+        let index = git_index_with_paths(&["package.json", "crates/app/Cargo.toml"]);
+
+        assert_eq!(
+            parse_tracked_paths_from_index(&index).unwrap(),
+            vec![
+                PathBuf::from("package.json"),
+                PathBuf::from("crates/app/Cargo.toml")
+            ]
+        );
+    }
+
+    #[test]
+    fn lockfile_expectations_match_manifest_siblings() {
+        assert_eq!(
+            expected_lockfile_paths(Path::new("apps/web/package.json")).unwrap(),
+            vec![
+                PathBuf::from("apps/web/package-lock.json"),
+                PathBuf::from("apps/web/npm-shrinkwrap.json"),
+                PathBuf::from("apps/web/pnpm-lock.yaml"),
+                PathBuf::from("apps/web/yarn.lock"),
+                PathBuf::from("apps/web/bun.lockb"),
+                PathBuf::from("apps/web/bun.lock"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lockfile_validation_uses_tracked_files_not_filesystem_presence() {
+        let root = temp_repo("untracked-lockfile");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("package.json"), r#"{"scripts": {}}"#).unwrap();
+        fs::write(root.join("package-lock.json"), "{}").unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["package.json"]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 1);
+    }
+
+    #[test]
+    fn cargo_workspace_members_use_workspace_lockfile() {
+        let root = temp_repo("cargo-workspace-lockfile");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("crates/app")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/app\"]\n",
+        )
+        .unwrap();
+        fs::write(root.join("Cargo.lock"), "").unwrap();
+        fs::write(
+            root.join("crates/app/Cargo.toml"),
+            "[package]\nname = \"app\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["Cargo.toml", "Cargo.lock", "crates/app/Cargo.toml"]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 0);
+    }
+
+    #[test]
+    fn go_mod_without_requirements_does_not_need_go_sum() {
+        let root = temp_repo("go-mod-no-sum");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("go.mod"), "module example.com/app\n\ngo 1.22\n").unwrap();
+        fs::write(root.join(".git/index"), git_index_with_paths(&["go.mod"])).unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 0);
+    }
+
+    #[test]
+    fn missing_git_metadata_is_warning_only() {
+        let root = temp_repo("missing-git");
+        fs::write(root.join("package.json"), r#"{"scripts": {}}"#).unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 1);
+    }
+
+    fn temp_repo(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("locked-in-{name}-{nonce}"));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    fn git_index_with_paths(paths: &[&str]) -> Vec<u8> {
+        let mut index = Vec::new();
+        index.extend_from_slice(b"DIRC");
+        index.extend_from_slice(&2u32.to_be_bytes());
+        index.extend_from_slice(&u32::try_from(paths.len()).unwrap().to_be_bytes());
+
+        for path in paths {
+            let entry_start = index.len();
+            index.extend_from_slice(&[0; 40]);
+            index.extend_from_slice(&[0; 20]);
+            index.extend_from_slice(&u16::try_from(path.len()).unwrap().to_be_bytes());
+            index.extend_from_slice(path.as_bytes());
+            index.push(0);
+            while index.len().checked_sub(entry_start).unwrap() % 8 != 0 {
+                index.push(0);
+            }
+        }
+
+        index
     }
 }
