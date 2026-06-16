@@ -47,6 +47,7 @@ impl Violation {
 }
 
 pub struct LintResult {
+    pub results: Vec<FileLintResult>,
     pub violations_found: usize,
     pub warnings_found: usize,
     pub files_checked: usize,

@@ -8,7 +8,6 @@ use crate::file_types::{
     comment_style_for_file, has_extension, is_excluded, is_package_json, should_check_file,
 };
 use crate::parsers::line::check_file;
-use crate::report::print_violations;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -55,29 +54,27 @@ pub fn lint_files(root: &Path) -> LintResult {
     let mut warnings_found: usize = 0;
 
     for result in &checked_results {
-        if !result.violations.is_empty() {
-            print_violations(&result.path, &result.violations);
-            violations_found = violations_found.saturating_add(
-                result
-                    .violations
-                    .iter()
-                    .filter(|violation| violation.severity == Severity::Error)
-                    .count(),
-            );
-            warnings_found = warnings_found.saturating_add(
-                result
-                    .violations
-                    .iter()
-                    .filter(|violation| violation.severity == Severity::Warning)
-                    .count(),
-            );
-        }
+        violations_found = violations_found.saturating_add(
+            result
+                .violations
+                .iter()
+                .filter(|violation| violation.severity == Severity::Error)
+                .count(),
+        );
+        warnings_found = warnings_found.saturating_add(
+            result
+                .violations
+                .iter()
+                .filter(|violation| violation.severity == Severity::Warning)
+                .count(),
+        );
     }
 
     LintResult {
+        files_checked: checked_results.len(),
+        results: checked_results,
         violations_found,
         warnings_found,
-        files_checked: checked_results.len(),
     }
 }
 
