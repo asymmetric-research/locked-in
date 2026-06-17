@@ -3,7 +3,7 @@ use crate::context::git::{GitIndexStatus, SubmodulePruner, tracked_paths};
 use crate::context::lockfiles::{
     Ecosystem, expected_lockfile_paths, expected_lockfiles_for_manifest,
 };
-use crate::diagnostic::{FileLintResult, LintResult, Severity, Violation};
+use crate::diagnostic::{FileLintResult, LintResult, Severity, Violation, ViolationKind};
 use crate::file_types::{
     comment_style_for_file, has_extension, is_excluded, is_package_json, should_check_file,
 };
@@ -58,21 +58,21 @@ pub fn lint_files(root: &Path) -> LintResult {
             result
                 .violations
                 .iter()
-                .filter(|violation| violation.severity == Severity::Error)
+                .filter(|violation| violation.severity() == Severity::Error)
                 .count(),
         );
         warnings_found = warnings_found.saturating_add(
             result
                 .violations
                 .iter()
-                .filter(|violation| violation.severity == Severity::Warning)
+                .filter(|violation| violation.severity() == Severity::Warning)
                 .count(),
         );
     }
 
     LintResult {
         files_checked: checked_results.len(),
-        results: checked_results,
+        files: checked_results,
         violations_found,
         warnings_found,
     }
@@ -131,17 +131,16 @@ fn check_tracked_lockfiles(root: &Path) -> Vec<FileLintResult> {
             continue;
         }
 
-        let lockfiles = acceptable_paths
+        let candidates = acceptable_paths
             .iter()
-            .map(|path| path.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(", ");
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         results.push(FileLintResult {
             path: root.join(&manifest),
-            violations: vec![Violation::warning(
-                format!("Tracked manifest is missing a tracked lockfile: {lockfiles}"),
+            violations: vec![Violation::new(
+                ViolationKind::MissingTrackedLockfile { candidates },
+                0,
                 manifest.to_string_lossy(),
-                "missing-tracked-lockfile",
             )],
         });
     }
@@ -219,15 +218,9 @@ fn cargo_manifest_is_workspace(root: &Path, manifest: &Path) -> bool {
 }
 
 fn git_metadata_warning(status: GitIndexStatus) -> Violation {
-    let message = match status {
-        GitIndexStatus::MissingMetadata => {
-            "Git metadata not found; skipping tracked lockfile validation"
-        }
-        GitIndexStatus::MissingIndex => "Git index not found; skipping tracked lockfile validation",
-        GitIndexStatus::UnsupportedIndex => {
-            "Git index could not be parsed; skipping tracked lockfile validation"
-        }
-    };
-
-    Violation::warning(message, ".git/index", "git-metadata-unavailable")
+    Violation::new(
+        ViolationKind::GitMetadataUnavailable(status),
+        0,
+        ".git/index",
+    )
 }

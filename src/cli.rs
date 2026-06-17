@@ -177,7 +177,7 @@ where
         }
         OutputFormat::Text => {
             output::guard(
-                render_text(&mut out, &result.results, options.quiet).and_then(|()| out.flush()),
+                render_text(&mut out, &result.files, options.quiet).and_then(|()| out.flush()),
             );
             if !options.no_summary {
                 print_summary(&result, max);

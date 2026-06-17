@@ -1,3 +1,4 @@
+use crate::messages::{severity_label, violation_message};
 use crate::{FileLintResult, LintResult, Severity, Violation};
 use colored::Colorize;
 use serde_json::{Value, json};
@@ -10,16 +11,8 @@ const JSON_SCHEMA_VERSION: u32 = 1;
 fn displayed_violations(violations: &[Violation], quiet: bool) -> Vec<&Violation> {
     violations
         .iter()
-        .filter(|violation| !quiet || violation.severity == Severity::Error)
+        .filter(|violation| !quiet || violation.severity() == Severity::Error)
         .collect()
-}
-
-/// Human-facing label (text format).
-const fn severity_label(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Error => "Error",
-        Severity::Warning => "Warning",
-    }
 }
 
 /// Stable wire value (JSON format) — intentionally independent of the display label.
@@ -32,8 +25,8 @@ const fn severity_json(severity: Severity) -> &'static str {
 
 /// Render findings as human-readable text. Files with nothing left to show (e.g. a
 /// warning-only file under `--quiet`) are skipped entirely.
-pub fn render_text(w: &mut dyn Write, results: &[FileLintResult], quiet: bool) -> io::Result<()> {
-    for file in results {
+pub fn render_text(w: &mut dyn Write, files: &[FileLintResult], quiet: bool) -> io::Result<()> {
+    for file in files {
         let displayed = displayed_violations(&file.violations, quiet);
         if displayed.is_empty() {
             continue;
@@ -41,7 +34,7 @@ pub fn render_text(w: &mut dyn Write, results: &[FileLintResult], quiet: bool) -
 
         let has_errors = displayed
             .iter()
-            .any(|violation| violation.severity == Severity::Error);
+            .any(|violation| violation.severity() == Severity::Error);
         if has_errors {
             writeln!(w, "{}", format!("✗ {}", file.path.display()).red())?;
         } else {
@@ -49,7 +42,7 @@ pub fn render_text(w: &mut dyn Write, results: &[FileLintResult], quiet: bool) -
         }
 
         for violation in displayed {
-            let label = severity_label(violation.severity);
+            let label = severity_label(violation.severity());
             let location = if violation.line_num == 0 {
                 label.to_string()
             } else {
@@ -59,7 +52,7 @@ pub fn render_text(w: &mut dyn Write, results: &[FileLintResult], quiet: bool) -
                 w,
                 "  {} {}",
                 format!("{location}:").yellow(),
-                violation.message
+                violation_message(&violation.kind)
             )?;
             writeln!(w, "  {} {}", ">".blue(), violation.line_content)?;
         }
@@ -74,7 +67,7 @@ pub fn render_text(w: &mut dyn Write, results: &[FileLintResult], quiet: bool) -
 /// necessarily `files_checked`.
 pub fn render_json(w: &mut dyn Write, result: &LintResult, quiet: bool) -> io::Result<()> {
     let files: Vec<Value> = result
-        .results
+        .files
         .iter()
         .filter_map(|file| {
             let displayed = displayed_violations(&file.violations, quiet);
@@ -87,13 +80,13 @@ pub fn render_json(w: &mut dyn Write, result: &LintResult, quiet: bool) -> io::R
                     let mut obj = serde_json::Map::new();
                     obj.insert(
                         "severity".to_string(),
-                        json!(severity_json(violation.severity)),
+                        json!(severity_json(violation.severity())),
                     );
-                    obj.insert("rule_id".to_string(), json!(violation.rule_id));
+                    obj.insert("rule_id".to_string(), json!(violation.rule_id()));
                     if violation.line_num != 0 {
                         obj.insert("line".to_string(), json!(violation.line_num));
                     }
-                    obj.insert("message".to_string(), json!(violation.message));
+                    obj.insert("message".to_string(), json!(violation_message(&violation.kind)));
                     obj.insert("line_content".to_string(), json!(violation.line_content));
                     Value::Object(obj)
                 })
@@ -119,19 +112,25 @@ pub fn render_json(w: &mut dyn Write, result: &LintResult, quiet: bool) -> io::R
 #[cfg(test)]
 mod tests {
     use super::{render_json, render_text};
-    use crate::{FileLintResult, LintResult, Violation};
+    use crate::{FileLintResult, LintResult, Violation, ViolationKind};
     use std::path::PathBuf;
 
     fn sample() -> LintResult {
-        let results = vec![FileLintResult {
+        let files = vec![FileLintResult {
             path: PathBuf::from("Dockerfile"),
             violations: vec![
-                Violation::error(2, "use npm ci", "RUN npm install", "npm-install-bare"),
-                Violation::warning("missing lockfile", "package.json", "missing-tracked-lockfile"),
+                Violation::new(ViolationKind::NpmInstallBare, 2, "RUN npm install"),
+                Violation::new(
+                    ViolationKind::MissingTrackedLockfile {
+                        candidates: vec!["package-lock.json".to_string()],
+                    },
+                    0,
+                    "package.json",
+                ),
             ],
         }];
         LintResult {
-            results,
+            files,
             violations_found: 1,
             warnings_found: 1,
             files_checked: 1,
@@ -140,7 +139,7 @@ mod tests {
 
     fn text(quiet: bool) -> String {
         let mut buf = Vec::new();
-        render_text(&mut buf, &sample().results, quiet).unwrap();
+        render_text(&mut buf, &sample().files, quiet).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -155,7 +154,7 @@ mod tests {
         let out = text(false);
         assert!(out.contains("Error line 2:"));
         assert!(out.contains("Warning:"));
-        assert!(out.contains("use npm ci"));
+        assert!(out.contains("Use 'npm ci'"));
     }
 
     #[test]

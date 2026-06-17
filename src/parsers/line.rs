@@ -72,10 +72,10 @@ pub fn check_file(
         let mut line_violations = rules.check(effective_line, line_num, lint_context);
 
         if let Some(IgnoreDirective::Specific(rule)) = &prev_skip {
-            line_violations.retain(|v| v.rule_id.as_deref() != Some(rule.as_str()));
+            line_violations.retain(|v| v.rule_id() != rule.as_str());
         }
         if let Some(IgnoreDirective::Specific(rule)) = &inline_skip {
-            line_violations.retain(|v| v.rule_id.as_deref() != Some(rule.as_str()));
+            line_violations.retain(|v| v.rule_id() != rule.as_str());
         }
 
         violations.extend(line_violations);

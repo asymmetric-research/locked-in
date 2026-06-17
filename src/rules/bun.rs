@@ -1,4 +1,4 @@
-use crate::Violation;
+use crate::{Violation, ViolationKind};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -13,20 +13,18 @@ pub fn check_bun(line: &str, line_num: usize, bun_frozen_lockfile: bool) -> Vec<
 
     if BUN_INSTALL_RE.is_match(line) && !line.contains("--frozen-lockfile") && !bun_frozen_lockfile
     {
-        violations.push(Violation::error(
+        violations.push(Violation::new(
+            ViolationKind::BunFrozenLockfile,
             line_num,
-            "Use 'bun install --frozen-lockfile' unless repo-local bunfig.toml sets '[install].frozenLockfile = true' (https://bun.com/docs/runtime/bunfig#install-frozenlockfile)",
             line.trim(),
-            "bun-frozen-lockfile",
         ));
     }
 
     if BUN_ADD_RE.is_match(line) && !has_version_pin(line) {
-        violations.push(Violation::error(
+        violations.push(Violation::new(
+            ViolationKind::BunVersionPin,
             line_num,
-            "bun package installation without version pin (use 'bun add package@version')",
             line.trim(),
-            "bun-version-pin",
         ));
     }
 

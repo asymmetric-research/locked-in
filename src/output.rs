@@ -20,13 +20,11 @@ pub fn guard(result: io::Result<()>) {
     std::process::exit(EXIT_IO_ERROR);
 }
 
-/// Write a single line to stdout, broken-pipe-safe.
 pub fn out_line(text: impl Display) {
     let stdout = io::stdout();
     guard(writeln!(stdout.lock(), "{text}"));
 }
 
-/// Write a single line to stderr, broken-pipe-safe.
 pub fn err_line(text: impl Display) {
     let stderr = io::stderr();
     guard(writeln!(stderr.lock(), "{text}"));

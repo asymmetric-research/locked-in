@@ -1,4 +1,4 @@
-use crate::Violation;
+use crate::{Violation, ViolationKind};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -15,20 +15,18 @@ pub fn check_yarn(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
     if YARN_INSTALL_RE.is_match(line) && !YARN_FROZEN_RE.is_match(line) {
-        violations.push(Violation::error(
+        violations.push(Violation::new(
+            ViolationKind::YarnFrozenLockfile,
             line_num,
-            "Use 'yarn install --frozen-lockfile' to respect lockfile",
             line.trim(),
-            "yarn-frozen-lockfile",
         ));
     }
 
     if YARN_ADD_RE.is_match(line) && !has_version_pin(line) {
-        violations.push(Violation::error(
+        violations.push(Violation::new(
+            ViolationKind::YarnVersionPin,
             line_num,
-            "yarn package installation without version pin (use 'yarn add package@version')",
             line.trim(),
-            "yarn-version-pin",
         ));
     }
 

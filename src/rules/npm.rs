@@ -1,4 +1,4 @@
-use crate::Violation;
+use crate::{Violation, ViolationKind};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -22,18 +22,16 @@ pub fn check_npm(line: &str, line_num: usize) -> Vec<Violation> {
         }
 
         if BARE_NPM_INSTALL_RE.is_match(line) {
-            violations.push(Violation::error(
+            violations.push(Violation::new(
+                ViolationKind::NpmInstallBare,
                 line_num,
-                "Use 'npm ci' instead of 'npm install' for lockfile-based installations",
                 line.trim(),
-                "npm-install-bare",
             ));
         } else {
-            violations.push(Violation::error(
+            violations.push(Violation::new(
+                ViolationKind::NpmVersionPin,
                 line_num,
-                "npm package installation without version pin (use 'npm i package@version')",
                 line.trim(),
-                "npm-version-pin",
             ));
         }
     }
