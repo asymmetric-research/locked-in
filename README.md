@@ -149,7 +149,70 @@ locked-in
 locked-in /path/to/repo
 ```
 
-Exit code 0 on success, 1 if violations found.
+Exit code 0 on success, 1 if it should fail (see below), 2 on invalid arguments.
+
+#### Options
+
+| Flag | Behavior |
+|---|---|
+| `-q`, `--quiet` | Suppress warning lines from output. Errors and the summary are still printed. Exit code unchanged. |
+| `--max-warnings <N>` | Exit non-zero if the warning count exceeds `N`. Defaults to unlimited (warnings never fail the run). |
+| `--fail-on <level>` | One of `error` (default) or `warning`. `--fail-on warning` is equivalent to `--max-warnings 0`. |
+| `--format <fmt>` | Output format: `text` (default) or `json`. |
+| `--no-summary` | Skip the trailing `═══ Found N violation(s) ═══` summary block (text format only). |
+| `-h`, `--help` | Show help. |
+| `-V`, `--version` | Show version. |
+
+Errors always fail the run (exit `1`). Warnings only affect the exit code when a threshold is set
+via `--max-warnings` or `--fail-on warning`; when both are given, the stricter (lower) threshold
+applies. The flags compose — e.g. `--quiet --max-warnings 0` shows only errors but still fails on
+any warning.
+
+#### Output streams
+
+Findings are written to **stdout**; the progress line and the summary block are written to
+**stderr**. This means `locked-in . > findings.txt` captures only the findings, leaving the
+chrome on the terminal. The exit code is unaffected by which stream output goes to, and by a
+broken downstream pipe (e.g. `locked-in . | head` exits cleanly rather than panicking).
+
+#### JSON output
+
+`--format json` writes a single JSON document to stdout (no progress/summary chrome, so the
+output is always valid JSON). Counts always reflect the full scan; `--quiet` still filters
+warnings out of the per-file arrays, and `--no-summary` has no effect in this mode. `files`
+lists only files with findings, so `files.length` is not necessarily `files_checked`. The
+`schema_version` field is bumped on any breaking change to this shape.
+
+```json
+{
+  "schema_version": 1,
+  "files_checked": 8,
+  "violations_found": 1,
+  "warnings_found": 1,
+  "files": [
+    {
+      "path": "Dockerfile",
+      "violations": [
+        {
+          "severity": "error",
+          "rule_id": "npm-install-bare",
+          "line": 15,
+          "message": "Use 'npm ci' instead of 'npm install' for lockfile-based installations",
+          "line_content": "RUN npm install"
+        }
+      ]
+    }
+  ]
+}
+```
+
+#### CI tuning
+
+| Goal | Flags |
+|---|---|
+| Errors-only display, fail on errors (default behavior, quieter log) | `--quiet` |
+| Errors-only display, fail on errors **or** warnings | `--quiet --max-warnings 0` |
+| Full display, fail on errors **or** warnings | `--max-warnings 0` |
 
 ## Dependency Cooldowns
 

@@ -3,13 +3,26 @@ pub mod context;
 mod diagnostic;
 mod file_types;
 mod ignore_directives;
+mod messages;
+mod output;
 mod parsers;
 mod report;
 mod rules;
 mod scanner;
 
-pub use diagnostic::{FileLintResult, LintResult, Severity, Violation};
+pub use diagnostic::{FileLintResult, LintResult, Severity, Violation, ViolationKind};
 pub use scanner::lint_files;
+
+/// Process exit codes. A single source of truth shared across `cli` and `output`.
+pub const EXIT_SUCCESS: i32 = 0;
+pub const EXIT_FINDINGS: i32 = 1;
+pub const EXIT_USAGE: i32 = 2;
+/// Conventional "killed by SIGPIPE" code (128 + 13). Rust ignores SIGPIPE, so we map a
+/// broken pipe to this ourselves rather than exiting `0` (which would mask findings).
+pub const EXIT_BROKEN_PIPE: i32 = 141;
+/// A write to stdout/stderr failed for a reason other than a broken pipe (e.g. a full
+/// disk on a redirect). Surfaced loudly rather than producing truncated output silently.
+pub const EXIT_IO_ERROR: i32 = 74;
 
 #[cfg(test)]
 mod tests {
@@ -31,6 +44,7 @@ mod tests {
     use crate::parsers::line::{
         check_file, is_comment_or_placeholder, should_lint_markdown_code_block,
     };
+    use crate::ViolationKind;
     use crate::rules::{check_bun, check_npm, check_pnpm, check_yarn};
     use std::collections::HashMap;
     use std::fs;
@@ -66,15 +80,14 @@ mod tests {
     fn npm_install_bare_violation() {
         let violations = check_npm("npm install", 1);
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].rule_id.as_deref(), Some("npm-install-bare"));
+        assert_eq!(violations[0].kind, ViolationKind::NpmInstallBare);
     }
 
     #[test]
     fn npm_install_global_yarn_is_still_npm() {
         let violations = check_npm("npm install -g yarn", 1);
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].rule_id.as_deref(), Some("npm-version-pin"));
-        assert!(violations[0].message.contains("npm"));
+        assert_eq!(violations[0].kind, ViolationKind::NpmVersionPin);
     }
 
     #[test]
@@ -147,7 +160,7 @@ mod tests {
         let content = "# locked-in: ignore[bun-frozen-lockfile]\nbun install\nbun add react\n";
         let violations = check_file(content, &context(false, false, false), &shell_style());
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].rule_id.as_deref(), Some("bun-version-pin"));
+        assert_eq!(violations[0].kind, ViolationKind::BunVersionPin);
     }
 
     #[test]

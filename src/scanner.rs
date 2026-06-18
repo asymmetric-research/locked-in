@@ -4,12 +4,11 @@ use crate::context::js_workspace::{declares_member, workspace_patterns};
 use crate::context::lockfiles::{
     Ecosystem, expected_lockfile_paths, expected_lockfiles_for_manifest, javascript_lockfiles,
 };
-use crate::diagnostic::{FileLintResult, LintResult, Severity, Violation};
+use crate::diagnostic::{FileLintResult, LintResult, Severity, Violation, ViolationKind};
 use crate::file_types::{
     comment_style_for_file, has_extension, is_excluded, is_package_json, should_check_file,
 };
 use crate::parsers::line::check_file;
-use crate::report::print_violations;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -56,29 +55,27 @@ pub fn lint_files(root: &Path) -> LintResult {
     let mut warnings_found: usize = 0;
 
     for result in &checked_results {
-        if !result.violations.is_empty() {
-            print_violations(&result.path, &result.violations);
-            violations_found = violations_found.saturating_add(
-                result
-                    .violations
-                    .iter()
-                    .filter(|violation| violation.severity == Severity::Error)
-                    .count(),
-            );
-            warnings_found = warnings_found.saturating_add(
-                result
-                    .violations
-                    .iter()
-                    .filter(|violation| violation.severity == Severity::Warning)
-                    .count(),
-            );
-        }
+        violations_found = violations_found.saturating_add(
+            result
+                .violations
+                .iter()
+                .filter(|violation| violation.severity() == Severity::Error)
+                .count(),
+        );
+        warnings_found = warnings_found.saturating_add(
+            result
+                .violations
+                .iter()
+                .filter(|violation| violation.severity() == Severity::Warning)
+                .count(),
+        );
     }
 
     LintResult {
+        files_checked: checked_results.len(),
+        files: checked_results,
         violations_found,
         warnings_found,
-        files_checked: checked_results.len(),
     }
 }
 
@@ -135,17 +132,16 @@ fn check_tracked_lockfiles(root: &Path) -> Vec<FileLintResult> {
             continue;
         }
 
-        let lockfiles = acceptable_paths
+        let candidates = acceptable_paths
             .iter()
-            .map(|path| path.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(", ");
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         results.push(FileLintResult {
             path: root.join(&manifest),
-            violations: vec![Violation::warning(
-                format!("Tracked manifest is missing a tracked lockfile: {lockfiles}"),
+            violations: vec![Violation::new(
+                ViolationKind::MissingTrackedLockfile { candidates },
+                0,
                 manifest.to_string_lossy(),
-                "missing-tracked-lockfile",
             )],
         });
     }
@@ -255,15 +251,9 @@ fn js_workspace_includes_member(root: &Path, workspace_dir: &Path, member: &Path
 }
 
 fn git_metadata_warning(status: GitIndexStatus) -> Violation {
-    let message = match status {
-        GitIndexStatus::MissingMetadata => {
-            "Git metadata not found; skipping tracked lockfile validation"
-        }
-        GitIndexStatus::MissingIndex => "Git index not found; skipping tracked lockfile validation",
-        GitIndexStatus::UnsupportedIndex => {
-            "Git index could not be parsed; skipping tracked lockfile validation"
-        }
-    };
-
-    Violation::warning(message, ".git/index", "git-metadata-unavailable")
+    Violation::new(
+        ViolationKind::GitMetadataUnavailable(status),
+        0,
+        ".git/index",
+    )
 }

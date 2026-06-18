@@ -1,4 +1,4 @@
-use crate::Violation;
+use crate::{Violation, ViolationKind};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -12,20 +12,18 @@ pub fn check_pnpm(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
     if PNPM_INSTALL_RE.is_match(line) && !line.contains("--frozen-lockfile") {
-        violations.push(Violation::error(
+        violations.push(Violation::new(
+            ViolationKind::PnpmFrozenLockfile,
             line_num,
-            "Use 'pnpm install --frozen-lockfile' to respect lockfile",
             line.trim(),
-            "pnpm-frozen-lockfile",
         ));
     }
 
     if PNPM_ADD_RE.is_match(line) && !has_version_pin(line) {
-        violations.push(Violation::error(
+        violations.push(Violation::new(
+            ViolationKind::PnpmVersionPin,
             line_num,
-            "pnpm package installation without version pin (use 'pnpm add package@version')",
             line.trim(),
-            "pnpm-version-pin",
         ));
     }
 
