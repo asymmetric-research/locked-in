@@ -31,6 +31,9 @@ mod tests {
         SubmodulePruner, gitdir_target_is_submodule, parse_gitdir_target_from_content,
         parse_gitmodules_paths_from_content, parse_tracked_paths_from_index,
     };
+    use crate::context::js_workspace::{
+        declares_member, patterns_from_package_json, patterns_from_pnpm_yaml,
+    };
     use crate::context::lockfiles::expected_lockfile_paths;
     use crate::file_types::{
         comment_style_for_file, is_excluded, is_package_json, should_check_file,
@@ -279,6 +282,68 @@ bun install
     }
 
     #[test]
+    fn workspace_patterns_parse_from_package_json() {
+        assert_eq!(
+            patterns_from_package_json(r#"{"workspaces": ["packages/*", "tests"]}"#),
+            vec!["packages/*".to_string(), "tests".to_string()]
+        );
+        assert_eq!(
+            patterns_from_package_json(
+                r#"{"workspaces": {"packages": ["packages/*"], "nohoist": ["**/x"]}}"#
+            ),
+            vec!["packages/*".to_string()]
+        );
+        assert!(patterns_from_package_json(r#"{"name": "x"}"#).is_empty());
+        assert!(patterns_from_package_json("not json").is_empty());
+    }
+
+    #[test]
+    fn workspace_patterns_parse_from_pnpm_yaml() {
+        assert_eq!(
+            patterns_from_pnpm_yaml("packages:\n  - \"packages/*\"\n  - 'apps/*'\n  - libs/shared\n"),
+            vec![
+                "packages/*".to_string(),
+                "apps/*".to_string(),
+                "libs/shared".to_string()
+            ]
+        );
+        // Items under keys other than `packages:` are not collected.
+        assert_eq!(
+            patterns_from_pnpm_yaml("overrides:\n  foo: 1.0.0\npackages:\n  - packages/*\n"),
+            vec!["packages/*".to_string()]
+        );
+        // A file with no `packages:` key yields nothing. This is the shape of Anchor's
+        // docs/pnpm-workspace.yaml (overrides only), which must not be treated as a workspace.
+        assert!(patterns_from_pnpm_yaml("overrides:\n  foo: 1.0.0\n").is_empty());
+    }
+
+    #[test]
+    fn workspace_glob_patterns_resolve_members() {
+        let single = vec!["packages/*".to_string()];
+        assert!(declares_member(&single, Path::new("packages/app")));
+        assert!(!declares_member(&single, Path::new("packages/app/nested")));
+        assert!(!declares_member(&single, Path::new("other/app")));
+
+        assert!(declares_member(&["tests".to_string()], Path::new("tests")));
+        assert!(declares_member(
+            &["spl/metadata".to_string()],
+            Path::new("spl/metadata")
+        ));
+
+        let recursive = vec!["packages/**".to_string()];
+        assert!(declares_member(&recursive, Path::new("packages/a")));
+        assert!(declares_member(&recursive, Path::new("packages/a/b")));
+
+        let partial = vec!["packages/spl-*".to_string()];
+        assert!(declares_member(&partial, Path::new("packages/spl-token")));
+        assert!(!declares_member(&partial, Path::new("packages/borsh")));
+
+        let negated = vec!["packages/*".to_string(), "!packages/private".to_string()];
+        assert!(declares_member(&negated, Path::new("packages/app")));
+        assert!(!declares_member(&negated, Path::new("packages/private")));
+    }
+
+    #[test]
     fn lockfile_validation_uses_tracked_files_not_filesystem_presence() {
         let root = temp_repo("untracked-lockfile");
         fs::create_dir(root.join(".git")).unwrap();
@@ -324,6 +389,223 @@ bun install
         fs::remove_dir_all(root).unwrap();
         assert_eq!(result.violations_found, 0);
         assert_eq!(result.warnings_found, 0);
+    }
+
+    #[test]
+    fn yarn_workspace_members_use_root_lockfile() {
+        let root = temp_repo("yarn-workspace-lockfile");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("packages/app")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"private": true, "workspaces": ["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(root.join("yarn.lock"), "").unwrap();
+        fs::write(
+            root.join("packages/app/package.json"),
+            r#"{"name": "app"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&[
+                "package.json",
+                "yarn.lock",
+                "packages/app/package.json",
+            ]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 0);
+    }
+
+    #[test]
+    fn npm_workspace_object_form_uses_root_lockfile() {
+        let root = temp_repo("npm-workspace-object");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("packages/app")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"private": true, "workspaces": {"packages": ["packages/*"]}}"#,
+        )
+        .unwrap();
+        fs::write(root.join("package-lock.json"), "{}").unwrap();
+        fs::write(
+            root.join("packages/app/package.json"),
+            r#"{"name": "app"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&[
+                "package.json",
+                "package-lock.json",
+                "packages/app/package.json",
+            ]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 0);
+    }
+
+    #[test]
+    fn bun_workspace_members_use_root_lockfile() {
+        let root = temp_repo("bun-workspace-lockfile");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("pkgs/app")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"private": true, "workspaces": ["pkgs/*"]}"#,
+        )
+        .unwrap();
+        fs::write(root.join("bun.lock"), "").unwrap();
+        fs::write(root.join("pkgs/app/package.json"), r#"{"name": "app"}"#).unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["package.json", "bun.lock", "pkgs/app/package.json"]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 0);
+    }
+
+    #[test]
+    fn pnpm_workspace_members_use_root_lockfile() {
+        let root = temp_repo("pnpm-workspace-lockfile");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("packages/app")).unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "root", "private": true}"#).unwrap();
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - \"packages/*\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("pnpm-lock.yaml"), "").unwrap();
+        fs::write(
+            root.join("packages/app/package.json"),
+            r#"{"name": "app"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&[
+                "package.json",
+                "pnpm-workspace.yaml",
+                "pnpm-lock.yaml",
+                "packages/app/package.json",
+            ]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 0);
+    }
+
+    #[test]
+    fn non_member_package_still_warns_when_lockfile_missing() {
+        // `packages/*` matches `packages/app` but not the unrelated package, which
+        // therefore still needs its own tracked lockfile.
+        let root = temp_repo("workspace-non-member");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("packages/app")).unwrap();
+        fs::create_dir_all(root.join("unrelated")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"private": true, "workspaces": ["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(root.join("yarn.lock"), "").unwrap();
+        fs::write(
+            root.join("packages/app/package.json"),
+            r#"{"name": "app"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("unrelated/package.json"),
+            r#"{"name": "unrelated"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&[
+                "package.json",
+                "yarn.lock",
+                "packages/app/package.json",
+                "unrelated/package.json",
+            ]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        // Only the non-member package warns; the workspace member is suppressed.
+        assert_eq!(result.warnings_found, 1);
+    }
+
+    #[test]
+    fn workspace_member_without_root_lockfile_still_warns() {
+        // Mirrors Cargo semantics: with no tracked root lockfile, both the member
+        // (listing the root lockfile candidates) and the root manifest warn.
+        let root = temp_repo("workspace-no-root-lockfile");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("packages/app")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"private": true, "workspaces": ["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("packages/app/package.json"),
+            r#"{"name": "app"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["package.json", "packages/app/package.json"]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 2);
+    }
+
+    #[test]
+    fn standalone_package_without_lockfile_still_warns() {
+        let root = temp_repo("standalone-package");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "solo"}"#).unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["package.json"]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 1);
     }
 
     #[test]

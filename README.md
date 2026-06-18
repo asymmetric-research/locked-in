@@ -74,6 +74,8 @@ Supported manifest pairs:
 - `go.mod` → `go.sum`
 
 Cargo workspace members may use a tracked `Cargo.lock` from an ancestor workspace root (members never have individual lockfiles — that is Cargo workspace semantics). The workspace root's `Cargo.lock` should be committed: the Cargo Book [recommends](https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control) checking it in ("when in doubt, check `Cargo.lock` into the version control system"), and from a supply-chain perspective it provides the same deterministic, auditable dependency snapshot that every other lockfile does, regardless of whether the crate is a library or binary.
+
+JavaScript workspace members (npm, yarn, pnpm, and bun) may likewise use a tracked lockfile from an ancestor workspace root that declares them as a member — the same way Cargo workspaces share a single lockfile. Membership is read from the ancestor `package.json` `"workspaces"` field — accepting both the `["packages/*"]` array form (used by npm, yarn, and bun) and the `{ "packages": [...] }` object form — or from a `pnpm-workspace.yaml` `packages:` list alongside it; glob patterns such as `packages/*` are resolved against the member's path. Standalone `package.json` files with no enclosing workspace still require their own tracked lockfile.
 Go modules without `require` directives do not require `go.sum`.
 
 If git metadata is unavailable, tracked lockfile validation is skipped with a warning and does not fail the run.

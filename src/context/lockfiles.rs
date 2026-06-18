@@ -44,6 +44,16 @@ pub const fn lockfile_expectations() -> &'static [LockfileExpectation] {
     EXPECTATIONS
 }
 
+/// The lockfile names recognized for the JavaScript ecosystem
+/// (npm / yarn / pnpm / bun).
+#[must_use]
+pub fn javascript_lockfiles() -> &'static [&'static str] {
+    EXPECTATIONS
+        .iter()
+        .find(|expectation| expectation.ecosystem == Ecosystem::JavaScript)
+        .map_or(&[], |expectation| expectation.lockfiles)
+}
+
 #[must_use]
 pub fn expected_lockfiles_for_manifest(path: &Path) -> Option<&'static LockfileExpectation> {
     let file_name = path.file_name()?.to_str()?;

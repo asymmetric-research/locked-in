@@ -1,7 +1,8 @@
 use crate::context::bun::bun_frozen_lockfile_enabled;
 use crate::context::git::{GitIndexStatus, SubmodulePruner, tracked_paths};
+use crate::context::js_workspace::{declares_member, workspace_patterns};
 use crate::context::lockfiles::{
-    Ecosystem, expected_lockfile_paths, expected_lockfiles_for_manifest,
+    Ecosystem, expected_lockfile_paths, expected_lockfiles_for_manifest, javascript_lockfiles,
 };
 use crate::diagnostic::{FileLintResult, LintResult, Severity, Violation, ViolationKind};
 use crate::file_types::{
@@ -188,6 +189,13 @@ fn acceptable_lockfile_paths(
         paths.extend(cargo_workspace_lockfile_paths(root, manifest));
         paths.sort();
         paths.dedup();
+    } else if manifest
+        .file_name()
+        .is_some_and(|name| name == "package.json")
+    {
+        paths.extend(js_workspace_lockfile_paths(root, manifest));
+        paths.sort();
+        paths.dedup();
     }
 
     paths
@@ -215,6 +223,31 @@ fn cargo_manifest_is_workspace(root: &Path, manifest: &Path) -> bool {
             .lines()
             .any(|line| line.trim_start().starts_with("[workspace]"))
     })
+}
+
+fn js_workspace_lockfile_paths(root: &Path, manifest: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut current = manifest.parent();
+
+    while let Some(dir) = current {
+        let workspace_manifest = dir.join("package.json");
+        if workspace_manifest != manifest && js_workspace_includes_member(root, dir, manifest) {
+            paths.extend(javascript_lockfiles().iter().map(|name| dir.join(name)));
+        }
+        current = dir.parent();
+    }
+
+    paths
+}
+
+fn js_workspace_includes_member(root: &Path, workspace_dir: &Path, member: &Path) -> bool {
+    let Some(member_dir) = member.parent() else {
+        return false;
+    };
+    let Ok(member_rel) = member_dir.strip_prefix(workspace_dir) else {
+        return false;
+    };
+    declares_member(&workspace_patterns(root, workspace_dir), member_rel)
 }
 
 fn git_metadata_warning(status: GitIndexStatus) -> Violation {
