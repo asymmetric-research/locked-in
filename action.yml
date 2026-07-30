@@ -26,9 +26,13 @@ runs:
 
         # Determine which commit to use
         COMMIT="${INPUT_COMMIT}"
+        COMMIT_WAS_PINNED=false
         if [ -n "$COMMIT" ] && ! [[ "$COMMIT" =~ ^[a-fA-F0-9]{40}$ ]]; then
           echo "Error: Invalid commit SHA format (must be 40 hex characters)"
           exit 1
+        fi
+        if [ -n "$COMMIT" ]; then
+          COMMIT_WAS_PINNED=true
         fi
         
         if [ -z "$COMMIT" ]; then
@@ -46,13 +50,12 @@ runs:
         
         # Use gh CLI to download artifact if available
         if command -v gh &> /dev/null; then
-          # Try to download the specific commit artifact first
+          # Never substitute a different binary when the caller requested a commit.
           if gh run download --repo "${LOCKFILE_GUARD_REPO}" -n "locked-in-${COMMIT}" 2>/dev/null; then
             mv locked-in-linux-x64 locked-in
             chmod +x locked-in
             echo "Successfully downloaded binary for commit ${COMMIT}"
-          # Fall back to latest
-          elif gh run download --repo "${LOCKFILE_GUARD_REPO}" -n "locked-in-latest" 2>/dev/null; then
+          elif [ "$COMMIT_WAS_PINNED" = false ] && gh run download --repo "${LOCKFILE_GUARD_REPO}" -n "locked-in-latest" 2>/dev/null; then
             mv locked-in-linux-x64 locked-in
             chmod +x locked-in
             echo "Successfully downloaded latest binary"

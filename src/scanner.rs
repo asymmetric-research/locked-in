@@ -1,3 +1,4 @@
+use crate::bounded_io::{MAX_CONFIG_FILE_SIZE, MAX_SOURCE_FILE_SIZE, read_bounded_utf8};
 use crate::context::bun::bun_frozen_lockfile_enabled;
 use crate::context::git::{GitIndexStatus, SubmodulePruner, tracked_paths};
 use crate::context::js_workspace::{declares_member, workspace_patterns};
@@ -13,9 +14,11 @@ use crate::report::print_violations;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+const MAX_FILES_TO_SCAN: usize = 100_000;
+const MAX_CONCURRENT_FILE_SCANS: usize = 2;
 
 pub struct LintContext {
     pub bun_frozen_lockfile: bool,
@@ -25,7 +28,7 @@ pub struct LintContext {
 
 pub fn lint_files(root: &Path) -> LintResult {
     let submodule_pruner = SubmodulePruner::new(root);
-    let files_to_check: Vec<PathBuf> = WalkBuilder::new(root)
+    let mut files_to_check: Vec<PathBuf> = WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(true)
         .git_global(true)
@@ -39,14 +42,33 @@ pub fn lint_files(root: &Path) -> LintResult {
         .filter_map(Result::ok)
         .map(ignore::DirEntry::into_path)
         .filter(|path| path.is_file() && should_check_file(path))
+        .take(MAX_FILES_TO_SCAN.saturating_add(1))
         .collect();
+    let file_limit_exceeded = files_to_check.len() > MAX_FILES_TO_SCAN;
+    files_to_check.truncate(MAX_FILES_TO_SCAN);
 
     let bun_context_cache: Mutex<HashMap<PathBuf, bool>> = Mutex::new(HashMap::new());
 
-    let mut checked_results: Vec<FileLintResult> = files_to_check
-        .par_iter()
-        .filter_map(|path| lint_file(root, path, &bun_context_cache))
-        .collect();
+    let mut checked_results = Vec::new();
+    for files in files_to_check.chunks(MAX_CONCURRENT_FILE_SCANS) {
+        let chunk_results: Vec<FileLintResult> = files
+            .par_iter()
+            .filter_map(|path| lint_file(root, path, &bun_context_cache))
+            .collect();
+        checked_results.extend(chunk_results);
+    }
+
+    if file_limit_exceeded {
+        checked_results.push(FileLintResult {
+            path: root.to_path_buf(),
+            violations: vec![Violation::error(
+                0,
+                format!("Repository exceeds the {MAX_FILES_TO_SCAN}-file scan limit"),
+                root.to_string_lossy(),
+                "scan-file-limit",
+            )],
+        });
+    }
 
     checked_results.extend(check_tracked_lockfiles(root));
 
@@ -87,8 +109,26 @@ fn lint_file(
     path: &Path,
     bun_context_cache: &Mutex<HashMap<PathBuf, bool>>,
 ) -> Option<FileLintResult> {
-    let source = fs::read_to_string(path).ok()?;
     let comment_style = comment_style_for_file(path)?;
+    let max_file_size = if is_package_json(path) {
+        MAX_CONFIG_FILE_SIZE
+    } else {
+        MAX_SOURCE_FILE_SIZE
+    };
+    let source = match read_bounded_utf8(path, max_file_size, true) {
+        Ok(source) => source,
+        Err(error) => {
+            return Some(FileLintResult {
+                path: path.to_path_buf(),
+                violations: vec![Violation::error(
+                    0,
+                    format!("Input file {error}; refusing to skip security checks"),
+                    path.to_string_lossy(),
+                    "scan-input-unavailable",
+                )],
+            });
+        }
+    };
     let context = LintContext {
         bun_frozen_lockfile: bun_frozen_lockfile_enabled(root, path, bun_context_cache),
         is_markdown: has_extension(path, "md"),
@@ -158,8 +198,8 @@ fn manifest_needs_lockfile(root: &Path, manifest: &Path, ecosystem: Ecosystem) -
         return true;
     }
 
-    fs::read_to_string(root.join(manifest))
-        .is_ok_and(|content| go_mod_has_module_and_require(&content))
+    read_bounded_utf8(&root.join(manifest), MAX_CONFIG_FILE_SIZE, true)
+        .map_or(true, |content| go_mod_has_module_and_require(&content))
 }
 
 fn go_mod_has_module_and_require(content: &str) -> bool {
@@ -222,7 +262,7 @@ fn cargo_workspace_lockfile_paths(root: &Path, manifest: &Path) -> Vec<PathBuf> 
 }
 
 fn cargo_manifest_is_workspace(root: &Path, manifest: &Path) -> bool {
-    fs::read_to_string(root.join(manifest)).is_ok_and(|content| {
+    read_bounded_utf8(&root.join(manifest), MAX_CONFIG_FILE_SIZE, true).is_ok_and(|content| {
         content
             .lines()
             .any(|line| line.trim_start().starts_with("[workspace]"))

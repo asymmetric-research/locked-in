@@ -1,3 +1,4 @@
+mod bounded_io;
 pub mod cli;
 pub mod context;
 mod diagnostic;
@@ -287,7 +288,9 @@ bun install
     #[test]
     fn workspace_patterns_parse_from_pnpm_yaml() {
         assert_eq!(
-            patterns_from_pnpm_yaml("packages:\n  - \"packages/*\"\n  - 'apps/*'\n  - libs/shared\n"),
+            patterns_from_pnpm_yaml(
+                "packages:\n  - \"packages/*\"\n  - 'apps/*'\n  - libs/shared\n"
+            ),
             vec![
                 "packages/*".to_string(),
                 "apps/*".to_string(),
@@ -389,18 +392,10 @@ bun install
         )
         .unwrap();
         fs::write(root.join("yarn.lock"), "").unwrap();
-        fs::write(
-            root.join("packages/app/package.json"),
-            r#"{"name": "app"}"#,
-        )
-        .unwrap();
+        fs::write(root.join("packages/app/package.json"), r#"{"name": "app"}"#).unwrap();
         fs::write(
             root.join(".git/index"),
-            git_index_with_paths(&[
-                "package.json",
-                "yarn.lock",
-                "packages/app/package.json",
-            ]),
+            git_index_with_paths(&["package.json", "yarn.lock", "packages/app/package.json"]),
         )
         .unwrap();
 
@@ -422,11 +417,7 @@ bun install
         )
         .unwrap();
         fs::write(root.join("package-lock.json"), "{}").unwrap();
-        fs::write(
-            root.join("packages/app/package.json"),
-            r#"{"name": "app"}"#,
-        )
-        .unwrap();
+        fs::write(root.join("packages/app/package.json"), r#"{"name": "app"}"#).unwrap();
         fs::write(
             root.join(".git/index"),
             git_index_with_paths(&[
@@ -474,18 +465,18 @@ bun install
         let root = temp_repo("pnpm-workspace-lockfile");
         fs::create_dir(root.join(".git")).unwrap();
         fs::create_dir_all(root.join("packages/app")).unwrap();
-        fs::write(root.join("package.json"), r#"{"name": "root", "private": true}"#).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "root", "private": true}"#,
+        )
+        .unwrap();
         fs::write(
             root.join("pnpm-workspace.yaml"),
             "packages:\n  - \"packages/*\"\n",
         )
         .unwrap();
         fs::write(root.join("pnpm-lock.yaml"), "").unwrap();
-        fs::write(
-            root.join("packages/app/package.json"),
-            r#"{"name": "app"}"#,
-        )
-        .unwrap();
+        fs::write(root.join("packages/app/package.json"), r#"{"name": "app"}"#).unwrap();
         fs::write(
             root.join(".git/index"),
             git_index_with_paths(&[
@@ -518,11 +509,7 @@ bun install
         )
         .unwrap();
         fs::write(root.join("yarn.lock"), "").unwrap();
-        fs::write(
-            root.join("packages/app/package.json"),
-            r#"{"name": "app"}"#,
-        )
-        .unwrap();
+        fs::write(root.join("packages/app/package.json"), r#"{"name": "app"}"#).unwrap();
         fs::write(
             root.join("unrelated/package.json"),
             r#"{"name": "unrelated"}"#,
@@ -559,11 +546,7 @@ bun install
             r#"{"private": true, "workspaces": ["packages/*"]}"#,
         )
         .unwrap();
-        fs::write(
-            root.join("packages/app/package.json"),
-            r#"{"name": "app"}"#,
-        )
-        .unwrap();
+        fs::write(root.join("packages/app/package.json"), r#"{"name": "app"}"#).unwrap();
         fs::write(
             root.join(".git/index"),
             git_index_with_paths(&["package.json", "packages/app/package.json"]),
@@ -650,5 +633,87 @@ bun install
         }
 
         index
+    }
+
+    #[test]
+    fn malformed_git_index_count_is_rejected_before_allocation() {
+        let mut index = Vec::new();
+        index.extend_from_slice(b"DIRC");
+        index.extend_from_slice(&2u32.to_be_bytes());
+        index.extend_from_slice(&u32::MAX.to_be_bytes());
+
+        assert!(parse_tracked_paths_from_index(&index).is_none());
+    }
+
+    #[test]
+    fn adversarial_workspace_glob_does_not_backtrack_exponentially() {
+        let pattern = format!("{}b", "*a".repeat(200));
+        let path = format!("{}c", "a".repeat(200));
+
+        assert!(!declares_member(&[pattern], Path::new(&path)));
+    }
+
+    #[test]
+    fn workspace_pattern_limits_reject_excessively_long_patterns() {
+        let content = format!(r#"{{"workspaces":["{}"]}}"#, "a".repeat(1_025));
+
+        assert!(patterns_from_package_json(&content).is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_input_fails_closed() {
+        let root = temp_repo("invalid-utf8");
+        fs::write(root.join("install.sh"), b"npm install\n# \xff\n").unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 1);
+    }
+
+    #[test]
+    fn oversized_input_fails_closed_without_reading_it() {
+        let root = temp_repo("oversized-input");
+        let file = fs::File::create(root.join("README.md")).unwrap();
+        file.set_len(
+            u64::try_from(crate::bounded_io::MAX_SOURCE_FILE_SIZE)
+                .unwrap()
+                .saturating_add(1),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_input_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_repo("symlink-input");
+        fs::write(root.join("outside.txt"), "npm install\n").unwrap();
+        symlink(root.join("outside.txt"), root.join("README.md")).unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 1);
+    }
+
+    #[test]
+    fn violations_and_diagnostics_are_bounded() {
+        let content = "npm install\n".repeat(1_100);
+        let violations = check_file(&content, &context(false, false, false), &shell_style());
+        let diagnostic = crate::Violation::error(1, "message", "x".repeat(5_000), "test");
+
+        assert_eq!(violations.len(), 1_001);
+        assert_eq!(
+            violations.last().and_then(|item| item.rule_id.as_deref()),
+            Some("scan-violation-limit")
+        );
+        assert!(diagnostic.line_content.len() <= 4_099);
     }
 }

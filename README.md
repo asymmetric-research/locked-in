@@ -62,6 +62,9 @@ The comment syntax is extension-aware: `#` for shell, YAML, Makefile, and Docker
 | `bun-version-pin` | `bun add` without `@version` |
 | `missing-tracked-lockfile` | warning for tracked manifest without a tracked lockfile |
 | `git-metadata-unavailable` | warning when git metadata is unavailable for tracked lockfile validation |
+| `scan-input-unavailable` | input could not be safely read within scanner limits |
+| `scan-file-limit` | repository exceeds the maximum number of scanned files |
+| `scan-violation-limit` | additional findings were omitted after the per-file limit |
 
 ## Tracked Lockfiles
 
@@ -90,6 +93,8 @@ If git metadata is unavailable, tracked lockfile validation is skipped with a wa
 - `package.json` (the `scripts` field — npm/pnpm/yarn/bun commands run from here)
 
 Scanning respects `.gitignore` and skips common generated/vendor directories such as `node_modules`, `target`, `dist`, `build`, `coverage`, `vendor`, `.next`, `.nuxt`, `.turbo`, and `.cache`.
+
+To keep scans reliable on untrusted repositories, `locked-in` rejects symbolic-link inputs and limits scanned source files to 16 MiB, configuration and `package.json` files to 2 MiB, the Git index to 64 MiB and 100,000 entries, repositories to 100,000 relevant files, concurrent file parsing to two files, and retained findings to 1,000 per file. Files that cannot be read safely are reported as errors rather than silently skipped.
 
 ## Usage
 

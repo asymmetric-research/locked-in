@@ -1,5 +1,5 @@
+use crate::bounded_io::{MAX_CONFIG_FILE_SIZE, read_bounded_utf8};
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -26,7 +26,7 @@ pub fn bun_frozen_lockfile_enabled(
             return *enabled;
         }
 
-        let enabled = fs::read_to_string(&bunfig_path)
+        let enabled = read_bounded_utf8(&bunfig_path, MAX_CONFIG_FILE_SIZE, true)
             .is_ok_and(|content| bunfig_has_frozen_lockfile(&content));
         if let Ok(mut cache) = cache.lock() {
             cache.insert(bunfig_path, enabled);

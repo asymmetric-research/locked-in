@@ -2,6 +2,7 @@ use crate::Violation;
 use crate::ignore_directives::{
     CommentStyle, IgnoreDirective, is_ignore_directive, split_inline_ignore,
 };
+use crate::parsers::MAX_VIOLATIONS_PER_FILE;
 use crate::parsers::markdown::should_lint_markdown_code_block as markdown_should_lint_code_block;
 use crate::parsers::package_json::check_package_json;
 use crate::rules::{JavaScriptRules, Rule};
@@ -78,7 +79,20 @@ pub fn check_file(
             line_violations.retain(|v| v.rule_id.as_deref() != Some(rule.as_str()));
         }
 
+        let remaining = MAX_VIOLATIONS_PER_FILE.saturating_sub(violations.len());
+        if line_violations.len() > remaining {
+            line_violations.truncate(remaining);
+        }
         violations.extend(line_violations);
+        if violations.len() == MAX_VIOLATIONS_PER_FILE {
+            violations.push(Violation::error(
+                0,
+                format!("Stopped after {MAX_VIOLATIONS_PER_FILE} violations to bound resource use"),
+                "Additional violations were not retained",
+                "scan-violation-limit",
+            ));
+            break;
+        }
     }
 
     violations

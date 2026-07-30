@@ -1,5 +1,8 @@
-use std::fs;
+use crate::bounded_io::{MAX_CONFIG_FILE_SIZE, read_bounded_utf8};
 use std::path::Path;
+
+const MAX_WORKSPACE_PATTERNS: usize = 1_000;
+const MAX_WORKSPACE_PATTERN_LENGTH: usize = 1_024;
 
 /// Collects the workspace glob patterns declared at `dir` (relative to `root`).
 ///
@@ -15,10 +18,14 @@ pub fn workspace_patterns(root: &Path, dir: &Path) -> Vec<String> {
     let base = root.join(dir);
     let mut patterns = Vec::new();
 
-    if let Ok(content) = fs::read_to_string(base.join("package.json")) {
+    if let Ok(content) = read_bounded_utf8(&base.join("package.json"), MAX_CONFIG_FILE_SIZE, true) {
         patterns.extend(patterns_from_package_json(&content));
     }
-    if let Ok(content) = fs::read_to_string(base.join("pnpm-workspace.yaml")) {
+    if let Ok(content) = read_bounded_utf8(
+        &base.join("pnpm-workspace.yaml"),
+        MAX_CONFIG_FILE_SIZE,
+        true,
+    ) {
         patterns.extend(patterns_from_pnpm_yaml(&content));
     }
 
@@ -34,7 +41,10 @@ pub fn declares_member(patterns: &[String], member_rel: &Path) -> bool {
     let rel = rel.trim_end_matches('/');
 
     let mut matched = false;
-    for pattern in patterns {
+    for pattern in patterns.iter().take(MAX_WORKSPACE_PATTERNS) {
+        if pattern.len() > MAX_WORKSPACE_PATTERN_LENGTH {
+            continue;
+        }
         if let Some(negated) = pattern.strip_prefix('!') {
             if matches_glob(negated, rel) {
                 return false;
@@ -68,6 +78,8 @@ pub fn patterns_from_package_json(content: &str) -> Vec<String> {
             entries
                 .iter()
                 .filter_map(|entry| entry.as_str().map(String::from))
+                .filter(|pattern| pattern.len() <= MAX_WORKSPACE_PATTERN_LENGTH)
+                .take(MAX_WORKSPACE_PATTERNS)
                 .collect()
         })
         .unwrap_or_default()
@@ -86,7 +98,12 @@ pub fn patterns_from_pnpm_yaml(content: &str) -> Vec<String> {
 
         if in_packages {
             if let Some(item) = trimmed.strip_prefix('-') {
-                patterns.push(unquote(item.trim()).to_string());
+                let pattern = unquote(item.trim());
+                if pattern.len() <= MAX_WORKSPACE_PATTERN_LENGTH
+                    && patterns.len() < MAX_WORKSPACE_PATTERNS
+                {
+                    patterns.push(pattern.to_string());
+                }
                 continue;
             }
             // A non-list line that is itself unindented ends the packages block.
@@ -127,19 +144,28 @@ fn matches_glob(pattern: &str, path: &str) -> bool {
 }
 
 fn match_segments(pattern: &[&str], path: &[&str]) -> bool {
-    let Some((&segment, pattern_rest)) = pattern.split_first() else {
-        return path.is_empty();
-    };
+    let mut previous = vec![false; path.len().saturating_add(1)];
+    previous[0] = true;
 
-    if segment == "**" {
-        return (0..=path.len()).any(|skipped| match_segments(pattern_rest, &path[skipped..]));
+    for segment in pattern {
+        let mut current = vec![false; path.len().saturating_add(1)];
+        if *segment == "**" {
+            current[0] = previous[0];
+            for (path_index, _) in path.iter().enumerate() {
+                let current_index = path_index.saturating_add(1);
+                current[current_index] = previous[current_index] || current[path_index];
+            }
+        } else {
+            for (path_index, path_segment) in path.iter().enumerate() {
+                let current_index = path_index.saturating_add(1);
+                current[current_index] =
+                    previous[path_index] && matches_segment(segment, path_segment);
+            }
+        }
+        previous = current;
     }
 
-    let Some((&head, path_rest)) = path.split_first() else {
-        return false;
-    };
-
-    matches_segment(segment, head) && match_segments(pattern_rest, path_rest)
+    previous[path.len()]
 }
 
 /// Matches a single path segment, where `*` matches any run of characters and `?`
@@ -151,19 +177,26 @@ fn matches_segment(pattern: &str, text: &str) -> bool {
 }
 
 fn match_segment_chars(pattern: &[char], text: &[char]) -> bool {
-    match pattern.split_first() {
-        None => text.is_empty(),
-        Some((&'*', pattern_rest)) => {
-            match_segment_chars(pattern_rest, text)
-                || text
-                    .split_first()
-                    .is_some_and(|(_, text_rest)| match_segment_chars(pattern, text_rest))
+    let mut previous = vec![false; text.len().saturating_add(1)];
+    previous[0] = true;
+
+    for token in pattern {
+        let mut current = vec![false; text.len().saturating_add(1)];
+        if *token == '*' {
+            current[0] = previous[0];
+            for (text_index, _) in text.iter().enumerate() {
+                let current_index = text_index.saturating_add(1);
+                current[current_index] = previous[current_index] || current[text_index];
+            }
+        } else {
+            for (text_index, character) in text.iter().enumerate() {
+                let current_index = text_index.saturating_add(1);
+                current[current_index] =
+                    previous[text_index] && (*token == '?' || token == character);
+            }
         }
-        Some((&'?', pattern_rest)) => text
-            .split_first()
-            .is_some_and(|(_, text_rest)| match_segment_chars(pattern_rest, text_rest)),
-        Some((&expected, pattern_rest)) => text.split_first().is_some_and(|(&actual, text_rest)| {
-            actual == expected && match_segment_chars(pattern_rest, text_rest)
-        }),
+        previous = current;
     }
+
+    previous[text.len()]
 }
