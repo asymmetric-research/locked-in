@@ -16,8 +16,9 @@ pub use scanner::lint_files;
 mod tests {
     use crate::context::bun::{bun_frozen_lockfile_enabled, bunfig_has_frozen_lockfile};
     use crate::context::git::{
-        SubmodulePruner, gitdir_target_is_submodule, parse_gitdir_target_from_content,
-        parse_gitmodules_paths_from_content, parse_tracked_paths_from_index,
+        GitIndexStatus, SubmodulePruner, gitdir_target_is_submodule,
+        parse_gitdir_target_from_content, parse_gitmodules_paths_from_content,
+        parse_tracked_paths_from_index, tracked_paths,
     };
     use crate::context::js_workspace::{
         declares_member, patterns_from_package_json, patterns_from_pnpm_yaml,
@@ -643,6 +644,25 @@ bun install
         index.extend_from_slice(&u32::MAX.to_be_bytes());
 
         assert!(parse_tracked_paths_from_index(&index).is_none());
+    }
+
+    #[test]
+    fn oversized_git_index_reports_resource_limit() {
+        let root = temp_repo("oversized-git-index");
+        fs::create_dir(root.join(".git")).unwrap();
+        let index = fs::File::create(root.join(".git/index")).unwrap();
+        index
+            .set_len(
+                u64::try_from(crate::bounded_io::MAX_GIT_INDEX_SIZE)
+                    .unwrap()
+                    .saturating_add(1),
+            )
+            .unwrap();
+
+        let result = tracked_paths(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result, Err(GitIndexStatus::ExceedsLimits));
     }
 
     #[test]

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub enum GitIndexStatus {
     MissingMetadata,
     MissingIndex,
+    ExceedsLimits,
     UnsupportedIndex,
 }
 
@@ -129,6 +130,9 @@ pub fn tracked_paths(root: &Path) -> Result<Vec<PathBuf>, GitIndexStatus> {
         read_bounded_bytes(&git_dir.join("index"), MAX_GIT_INDEX_SIZE, false).map_err(|error| {
             match error {
                 BoundedReadError::Io(_) => GitIndexStatus::MissingIndex,
+                BoundedReadError::TooLarge { .. } | BoundedReadError::Allocation => {
+                    GitIndexStatus::ExceedsLimits
+                }
                 _ => GitIndexStatus::UnsupportedIndex,
             }
         })?;

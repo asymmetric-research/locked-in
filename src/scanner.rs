@@ -300,6 +300,9 @@ fn git_metadata_warning(status: GitIndexStatus) -> Violation {
             "Git metadata not found; skipping tracked lockfile validation"
         }
         GitIndexStatus::MissingIndex => "Git index not found; skipping tracked lockfile validation",
+        GitIndexStatus::ExceedsLimits => {
+            "Git index exceeds safe resource limits; skipping tracked lockfile validation"
+        }
         GitIndexStatus::UnsupportedIndex => {
             "Git index could not be parsed; skipping tracked lockfile validation"
         }
