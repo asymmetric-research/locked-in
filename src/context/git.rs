@@ -1,12 +1,21 @@
-use std::fs;
+use crate::bounded_io::{
+    BoundedReadError, MAX_CONFIG_FILE_SIZE, MAX_GIT_INDEX_SIZE, read_bounded_bytes,
+    read_bounded_utf8,
+};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitIndexStatus {
     MissingMetadata,
     MissingIndex,
+    ExceedsLimits,
     UnsupportedIndex,
 }
+
+const MIN_GIT_INDEX_ENTRY_SIZE: usize = 64;
+const MAX_GIT_INDEX_ENTRIES: usize = 100_000;
+const MAX_GIT_PATH_LENGTH: usize = 4_096;
+const MAX_SUBMODULE_PATHS: usize = 10_000;
 
 pub struct SubmodulePruner {
     pub(crate) root: PathBuf,
@@ -42,7 +51,8 @@ impl SubmodulePruner {
 
 #[must_use]
 pub fn parse_gitmodules_paths(root: &Path) -> Vec<PathBuf> {
-    let Ok(content) = fs::read_to_string(root.join(".gitmodules")) else {
+    let Ok(content) = read_bounded_utf8(&root.join(".gitmodules"), MAX_CONFIG_FILE_SIZE, true)
+    else {
         return Vec::new();
     };
 
@@ -56,17 +66,19 @@ pub fn parse_gitmodules_paths_from_content(content: &str) -> Vec<PathBuf> {
         .filter_map(|line| line.trim().split_once('='))
         .filter_map(|(key, value)| {
             if key.trim() == "path" {
-                Some(PathBuf::from(value.trim().trim_matches('"')))
+                let path = value.trim().trim_matches('"');
+                (path.len() <= MAX_GIT_PATH_LENGTH).then(|| PathBuf::from(path))
             } else {
                 None
             }
         })
+        .take(MAX_SUBMODULE_PATHS)
         .collect()
 }
 
 #[must_use]
 pub fn has_submodule_gitdir_file(path: &Path) -> bool {
-    fs::read_to_string(path.join(".git"))
+    read_bounded_utf8(&path.join(".git"), MAX_CONFIG_FILE_SIZE, false)
         .ok()
         .and_then(|content| parse_gitdir_target_from_content(&content))
         .is_some_and(|gitdir| gitdir_target_is_submodule(&gitdir))
@@ -96,7 +108,7 @@ pub fn git_metadata_dir(root: &Path) -> Option<PathBuf> {
         return Some(dot_git);
     }
 
-    let content = fs::read_to_string(&dot_git).ok()?;
+    let content = read_bounded_utf8(&dot_git, MAX_CONFIG_FILE_SIZE, false).ok()?;
     let gitdir = parse_gitdir_target_from_content(&content)?;
     let path = PathBuf::from(gitdir);
     Some(if path.is_absolute() {
@@ -114,7 +126,16 @@ pub fn git_metadata_dir(root: &Path) -> Option<PathBuf> {
 /// cannot be parsed.
 pub fn tracked_paths(root: &Path) -> Result<Vec<PathBuf>, GitIndexStatus> {
     let git_dir = git_metadata_dir(root).ok_or(GitIndexStatus::MissingMetadata)?;
-    let index = fs::read(git_dir.join("index")).map_err(|_| GitIndexStatus::MissingIndex)?;
+    let index =
+        read_bounded_bytes(&git_dir.join("index"), MAX_GIT_INDEX_SIZE, false).map_err(|error| {
+            match error {
+                BoundedReadError::Io(_) => GitIndexStatus::MissingIndex,
+                BoundedReadError::TooLarge { .. } | BoundedReadError::Allocation => {
+                    GitIndexStatus::ExceedsLimits
+                }
+                _ => GitIndexStatus::UnsupportedIndex,
+            }
+        })?;
     parse_tracked_paths_from_index(&index).ok_or(GitIndexStatus::UnsupportedIndex)
 }
 
@@ -130,8 +151,16 @@ pub fn parse_tracked_paths_from_index(index: &[u8]) -> Option<Vec<PathBuf>> {
     }
 
     let entry_count = usize::try_from(read_u32(&index[8..12])?).ok()?;
+    let maximum_possible_entries = index
+        .len()
+        .checked_sub(12)?
+        .checked_div(MIN_GIT_INDEX_ENTRY_SIZE)?;
+    if entry_count > maximum_possible_entries || entry_count > MAX_GIT_INDEX_ENTRIES {
+        return None;
+    }
     let mut offset = 12usize;
-    let mut paths = Vec::with_capacity(entry_count);
+    let mut paths = Vec::new();
+    paths.try_reserve(entry_count).ok()?;
 
     for _ in 0..entry_count {
         let entry_start = offset;
@@ -144,6 +173,9 @@ pub fn parse_tracked_paths_from_index(index: &[u8]) -> Option<Vec<PathBuf>> {
             .iter()
             .position(|byte| *byte == 0)
             .and_then(|position| path_start.checked_add(position))?;
+        if path_end.checked_sub(path_start)? > MAX_GIT_PATH_LENGTH {
+            return None;
+        }
         let path = std::str::from_utf8(&index[path_start..path_end]).ok()?;
         paths.push(PathBuf::from(path));
 
