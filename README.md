@@ -1,110 +1,37 @@
 # locked-in
 
-`locked-in` enforces version pinning, lockfile usage, and tracked-lockfile hygiene across JavaScript (npm, pnpm, yarn, bun), Cargo, and Go projects. It is **opinionated toward supply-chain security**: when in doubt, it errs on the conservative side.
+Supply-chain linting for package installs and lockfiles.
 
-It also warns when a tracked manifest exists without a corresponding lockfile tracked in the git index, so a lockfile present only in the working tree does not count.
+A committed lockfile only protects a build when every install command honors it. For example, `npm install` can update a lockfile when `package.json` and `package-lock.json` disagree; [`npm ci`](https://docs.npmjs.com/cli/commands/npm-ci) fails instead and never writes either file. Unpinned package additions create a similar gap by allowing the registry to choose the version.
 
-For defense in depth, combine lockfiles and version pinning with package-manager dependency cooldowns (minimum release age), which reduce risk from newly published malicious packages.
+`locked-in` finds these gaps in Dockerfiles, CI workflows, shell scripts, Makefiles, Markdown, and `package.json` scripts. It enforces frozen-lockfile installs and version-pinned package additions for npm, pnpm, yarn, and bun. It also checks that JavaScript, Cargo, and Go manifests have corresponding lockfiles committed to Git.
 
-## Rules
+The policy is deliberately conservative: install commands that may change dependency resolution are reported rather than inferred to be safe.
 
-**npm:**
-- ✅ `npm ci`, `npm i package@version`
-- ❌ `npm install`, `npm i package`
+## Quick start
 
-**pnpm:**
-- ✅ `pnpm install --frozen-lockfile`, `pnpm add package@version`
-- ❌ `pnpm install`, `pnpm add package`
+Choose a version from the [releases page](https://github.com/asymmetric-research/locked-in/releases), verify its commit, and install from that immutable revision. For example, `v0.4.0` resolves to `69b7eba80deb2d0285b51d63647c4a1139c1bab3`:
 
-**yarn:**
-- ✅ `yarn install --frozen-lockfile`, `yarn install --immutable`, `yarn add package@version`
-- ❌ `yarn install`, `yarn add package`
-
-**bun:**
-- ✅ `bun install --frozen-lockfile`, `bun add package@version`
-- ✅ bare `bun install` only when repo-local `bunfig.toml` sets `[install].frozenLockfile = true` (https://bun.com/docs/runtime/bunfig#install-frozenlockfile)
-- ❌ `bun install`, `bun add package`
-
-## Ignore Directives
-
-Suppress violations with inline comments. Two placement styles are supported:
-
-**Previous-line** — comment on its own line suppresses the next line:
-```
-# locked-in: ignore
-bun install
+```bash
+cargo install --locked --git https://github.com/asymmetric-research/locked-in \
+  --rev 69b7eba80deb2d0285b51d63647c4a1139c1bab3 locked-in
 ```
 
-**End-of-line** — comment at the end of the line suppresses that same line:
-```
-bun install  # locked-in: ignore
-```
+Scan the current repository or pass a repository path:
 
-To suppress a specific rule, include the rule ID in brackets:
-```
-# locked-in: ignore[yarn-frozen-lockfile]
-npm i eslint  # locked-in: ignore[npm-version-pin]
+```bash
+locked-in
+locked-in /path/to/repo
 ```
 
-The comment syntax is extension-aware: `#` for shell, YAML, Makefile, and Dockerfile; `<!-- locked-in: ignore -->` for Markdown.
+`locked-in` exits with status 0 when no violations are found, 1 when violations are found, and 2 for invalid command-line arguments. Missing tracked lockfiles and unavailable Git metadata are warnings and do not fail a run.
 
-**Available rule IDs:**
+## GitHub Actions
 
-| Rule ID | Description |
-|---|---|
-| `npm-install-bare` | bare `npm install` (should use `npm ci`) |
-| `npm-version-pin` | `npm i/pkg` without `@version` |
-| `pnpm-frozen-lockfile` | `pnpm install` without `--frozen-lockfile` |
-| `pnpm-version-pin` | `pnpm add` without `@version` |
-| `yarn-frozen-lockfile` | `yarn install` without `--frozen-lockfile`/`--immutable` |
-| `yarn-version-pin` | `yarn add` without `@version` |
-| `bun-frozen-lockfile` | `bun install` without `--frozen-lockfile` or config |
-| `bun-version-pin` | `bun add` without `@version` |
-| `missing-tracked-lockfile` | warning for tracked manifest without a tracked lockfile |
-| `git-metadata-unavailable` | warning when git metadata is unavailable for tracked lockfile validation |
-| `scan-input-unavailable` | input could not be safely read within scanner limits |
-| `scan-file-limit` | repository exceeds the maximum number of scanned files |
-| `scan-violation-limit` | additional findings were omitted after the per-file limit |
-
-## Tracked Lockfiles
-
-`locked-in` reads `.git/index` to verify tracked manifests have tracked lockfiles. A lockfile that exists only in the working tree does not satisfy this rule; it must be checked into git. Missing tracked lockfiles are warnings and do not fail the run.
-
-Supported manifest pairs:
-
-- `package.json` → `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb`, or `bun.lock`
-- `Cargo.toml` → `Cargo.lock`
-- `go.mod` → `go.sum`
-
-Cargo workspace members may use a tracked `Cargo.lock` from an ancestor workspace root (members never have individual lockfiles — that is Cargo workspace semantics). The workspace root's `Cargo.lock` should be committed: the Cargo Book [recommends](https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control) checking it in ("when in doubt, check `Cargo.lock` into the version control system"), and from a supply-chain perspective it provides the same deterministic, auditable dependency snapshot that every other lockfile does, regardless of whether the crate is a library or binary.
-
-JavaScript workspace members (npm, yarn, pnpm, and bun) may likewise use a tracked lockfile from an ancestor workspace root that declares them as a member — the same way Cargo workspaces share a single lockfile. Membership is read from the ancestor `package.json` `"workspaces"` field — accepting both the `["packages/*"]` array form (used by npm, yarn, and bun) and the `{ "packages": [...] }` object form — or from a `pnpm-workspace.yaml` `packages:` list alongside it; glob patterns such as `packages/*` are resolved against the member's path. Standalone `package.json` files with no enclosing workspace still require their own tracked lockfile.
-Go modules without `require` directives do not require `go.sum`.
-
-If git metadata is unavailable, tracked lockfile validation is skipped with a warning and does not fail the run.
-
-## Scanned Files
-
-- Dockerfiles (`Dockerfile*`, `*.dockerfile`)
-- Markdown (`*.md`)
-- Shell scripts (`*.sh`, `*.bash`, `*.zsh`, `*.fish`, `*.ksh`, `*.csh`)
-- Makefiles (`Makefile`, `makefile`, `GNUmakefile`, `*.mk`)
-- GitHub Actions workflows (`.github/workflows/*.yml`, `.github/workflows/*.yaml`)
-- `package.json` (the `scripts` field — npm/pnpm/yarn/bun commands run from here)
-
-Scanning respects `.gitignore` and skips common generated/vendor directories such as `node_modules`, `target`, `dist`, `build`, `coverage`, `vendor`, `.next`, `.nuxt`, `.turbo`, and `.cache`.
-
-To keep scans reliable on untrusted repositories, `locked-in` rejects symbolic-link inputs and limits scanned source files to 16 MiB, configuration and `package.json` files to 2 MiB, the Git index to 64 MiB and 100,000 entries, repositories to 100,000 relevant files, concurrent file parsing to two files, and retained findings to 1,000 per file. Files that cannot be read safely are reported as errors rather than silently skipped.
-
-## Usage
-
-### GitHub Action
-
-The following is an example GitHub Action config that can be used to configure `locked-in`. 
-It's recommended to keep this up-to-date with the latest releases on this repo. (And to verify it independently via [zizmor](https://github.com/zizmorcore/zizmor).)
+Pin both the checkout action and `locked-in` to immutable commits:
 
 ```yaml
-name: Lint Package Installs
+name: Lint package installs
 
 on:
   pull_request:
@@ -119,8 +46,8 @@ jobs:
   locked-in:
     runs-on: ubuntu-latest
     env:
-      # Note: check recent releases and update these values.
-      LOCKED_IN_COMMIT: 74d8fd31d519ea9f4f95b01191dc6171df90f045 # v0.2.0
+      # v0.4.0. Check releases before updating this value.
+      LOCKED_IN_COMMIT: 69b7eba80deb2d0285b51d63647c4a1139c1bab3
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -131,63 +58,200 @@ jobs:
         run: locked-in .
 ```
 
-This pattern is recommended over floating refs such as `uses: asymmetric-research/locked-in@main` or `cargo install --git ...` without `--rev`: 
-it pins both `actions/checkout` and `locked-in` to immutable commits, disables persisted checkout credentials, and keeps 
-Cargo dependency resolution locked to the repository's `Cargo.lock`.
+This configuration avoids floating action and source references, disables persisted checkout credentials, and uses the repository's committed `Cargo.lock` during installation. Review new releases and their source before changing either pin. [zizmor](https://github.com/zizmorcore/zizmor) can independently check the workflow configuration.
 
-If you prefer inline values instead of an environment variable, pin `--rev` directly:
+## Rules
 
-```bash
-cargo install --locked --git https://github.com/asymmetric-research/locked-in --rev 74d8fd31d519ea9f4f95b01191dc6171df90f045 locked-in
-```
+### npm
 
-### CLI
+Accepted:
 
 ```bash
-# Install from a pinned commit. This example refers to locked-in v0.2.0
-cargo install --locked --git https://github.com/asymmetric-research/locked-in --rev 74d8fd31d519ea9f4f95b01191dc6171df90f045 locked-in
-
-# Run
-locked-in
-
-# Or scan a specific repository
-locked-in /path/to/repo
+npm ci
+npm i package@1.2.3
 ```
 
-Exit code 0 on success, 1 if violations found.
+Reported:
 
-## Dependency Cooldowns
-
-Lockfiles and version pinning are the primary controls this tool enforces. As defense in depth, consider enabling dependency cooldowns (minimum release age) in your package manager so very new package versions are not installable immediately.
-
-A good overview of dependency cooldown support can be found in the post [Package managers need to cool down](https://nesbitt.io/2026/03/04/package-managers-need-to-cool-down.html).
-
-- Use lockfiles + version pins to ensure reproducibility.
-- Use a minimum release age/cooldown to reduce exposure to fresh supply-chain attacks.
-- Keep this as an organizational policy in repo-level config where possible.
-
-Example policy (npm):
-
-```ini
-# .npmrc
-minimumReleaseAge=1440
+```text
+npm install
+npm i package
 ```
 
-Manager notes:
-- npm: supports `minimumReleaseAge` in config.
-- pnpm/yarn/bun: no direct equivalent documented here; keep using strict lockfile installs and exact version pins.
+### pnpm
 
-## Example
+Accepted:
 
+```bash
+pnpm install --frozen-lockfile
+pnpm add package@1.2.3
 ```
+
+Reported:
+
+```text
+pnpm install
+pnpm add package
+```
+
+### yarn
+
+Accepted:
+
+```bash
+yarn install --frozen-lockfile
+yarn install --immutable
+yarn add package@1.2.3
+```
+
+Reported:
+
+```text
+yarn install
+yarn add package
+```
+
+### bun
+
+Accepted:
+
+```bash
+bun install --frozen-lockfile
+bun add package@1.2.3
+```
+
+- A bare `bun install` is also accepted when the repository's `bunfig.toml` sets [`[install].frozenLockfile = true`](https://bun.com/docs/runtime/bunfig#install-frozenlockfile).
+
+Reported:
+
+```text
+bun install
+bun add package
+```
+
+## Tracked lockfiles
+
+`locked-in` reads `.git/index` to determine whether manifests and lockfiles are committed. A lockfile that exists only in the working tree does not satisfy this check.
+
+| Manifest | Accepted lockfile |
+|---|---|
+| `package.json` | `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb`, or `bun.lock` |
+| `Cargo.toml` | `Cargo.lock` |
+| `go.mod` | `go.sum` |
+
+Cargo workspace members may use a tracked `Cargo.lock` from an ancestor workspace root. The Cargo Book [recommends committing `Cargo.lock` when in doubt](https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control); it gives security reviews a deterministic dependency snapshot for libraries as well as binaries.
+
+JavaScript workspace members may use a tracked lockfile from an ancestor workspace root that declares them as a member. `locked-in` recognizes the `package.json` `workspaces` array, the `{ "packages": [...] }` form, and `pnpm-workspace.yaml` `packages` entries. Workspace globs such as `packages/*` are resolved against the member path. A standalone `package.json` still requires a lockfile in its own directory.
+
+A Go module without any `require` directives does not require `go.sum`.
+
+If Git metadata is unavailable, `locked-in` reports a warning and skips tracked-lockfile validation. Missing tracked lockfiles are also warnings; unsafe install commands remain errors.
+
+## Scanned files
+
+`locked-in` scans:
+
+- Dockerfiles: `Dockerfile*` and `*.dockerfile`
+- Markdown: `*.md`
+- Shell scripts: `*.sh`, `*.bash`, `*.zsh`, `*.fish`, `*.ksh`, and `*.csh`
+- Makefiles: `Makefile`, `makefile`, `GNUmakefile`, and `*.mk`
+- GitHub Actions workflows: `.github/workflows/*.yml` and `.github/workflows/*.yaml`
+- `package.json` scripts
+
+Scanning respects `.gitignore`. It also skips common generated and vendored directories, including `node_modules`, `target`, `dist`, `build`, `coverage`, `vendor`, `.next`, `.nuxt`, `.turbo`, and `.cache`.
+
+Repositories are treated as untrusted input. `locked-in` rejects symbolic-link inputs and applies these limits:
+
+| Input | Limit |
+|---|---:|
+| Source file | 16 MiB |
+| Configuration or `package.json` file | 2 MiB |
+| Git index | 64 MiB and 100,000 entries |
+| Relevant files per repository | 100,000 |
+| Concurrent file parsing | 2 files |
+| Retained findings | 1,000 per file |
+
+Files that cannot be read within these limits are reported as errors rather than silently skipped.
+
+## Ignore directives
+
+Use an inline directive when an unsafe-looking command is intentional and has been reviewed. A directive on its own line suppresses the next line:
+
+```text
+# locked-in: ignore
+bun install
+```
+
+A directive at the end of a line suppresses that line:
+
+```text
+bun install  # locked-in: ignore
+```
+
+Include a rule ID to suppress only that rule:
+
+```text
+# locked-in: ignore[yarn-frozen-lockfile]
+yarn install
+
+npm i eslint  # locked-in: ignore[npm-version-pin]
+```
+
+Shell, YAML, Makefile, and Dockerfile inputs use `#` comments. Markdown uses `<!-- locked-in: ignore -->`.
+
+### Rule IDs
+
+| Rule ID | Description |
+|---|---|
+| `npm-install-bare` | Bare `npm install`; use `npm ci` |
+| `npm-version-pin` | `npm install` or `npm i` without `@version` |
+| `pnpm-frozen-lockfile` | `pnpm install` without `--frozen-lockfile` |
+| `pnpm-version-pin` | `pnpm add` without `@version` |
+| `yarn-frozen-lockfile` | `yarn install` without `--frozen-lockfile` or `--immutable` |
+| `yarn-version-pin` | `yarn add` without `@version` |
+| `bun-frozen-lockfile` | Bun's install command without a frozen lockfile flag or repository configuration |
+| `bun-version-pin` | `bun add` without `@version` |
+| `missing-tracked-lockfile` | A tracked manifest has no corresponding tracked lockfile |
+| `git-metadata-unavailable` | Git metadata is unavailable for tracked-lockfile validation |
+| `scan-input-unavailable` | An input could not be read safely within scanner limits |
+| `scan-file-limit` | A repository exceeds the maximum number of scanned files |
+| `scan-violation-limit` | Additional findings were omitted after the per-file limit |
+
+## Example output
+
+```text
 ✗ ./Dockerfile
-  Line 15: Use 'npm ci' instead of 'npm install' for lockfile-based installations
+  Error line 15: Use 'npm ci' instead of 'npm install' for lockfile-based installations
   > npm install
 
 ✗ ./.github/workflows/deploy.yml
-  Line 42: Use 'pnpm install --frozen-lockfile' to respect lockfile
+  Error line 42: Use 'pnpm install --frozen-lockfile' to respect lockfile
   > pnpm install
 
 ═══════════════════════════════════════
-✗ Found 2 violation(s) in 2 files
+✗ Found 2 violation(s) and 0 warning(s) in 2 files
 ```
+
+## Dependency cooldowns
+
+Lockfiles and version pins make dependency resolution reproducible; they do not prevent a newly published malicious version from being selected when a dependency is intentionally updated. A minimum release age adds a delay before new versions become eligible for installation. The two controls address different parts of the update process and should be used together where the package manager supports them.
+
+For Bun, a repository-level policy can set a 24-hour minimum release age:
+
+```toml
+# bunfig.toml
+[install]
+minimumReleaseAge = 86400
+```
+
+[Package managers need to cool down](https://nesbitt.io/2026/03/04/package-managers-need-to-cool-down.html) surveys package-manager support and the security tradeoffs. Support changes over time, so check current npm, pnpm, yarn, and bun documentation before adopting a policy.
+
+## Why we built it
+
+At Asymmetric Research, package installation appears in the same places we review for higher-level security properties: build scripts, CI workflows, containers, and developer tooling. A repository can have a lockfile and still bypass it with one permissive install command, and that command is easy to miss in a large review.
+
+We built `locked-in` to make that policy explicit and mechanically enforceable. It checks the command sites and the Git-tracked dependency state, reports uncertainty rather than treating it as safe, and is bounded so it can run against untrusted repositories in CI and security work.
+
+## License
+
+`locked-in` is available under the [Apache License 2.0](LICENSE).
