@@ -34,6 +34,7 @@ mod tests {
         check_file, is_comment_or_placeholder, should_lint_markdown_code_block,
     };
     use crate::rules::{check_bun, check_npm, check_pnpm, check_yarn};
+    use crate::scanner::{LintOptions, lint_files_with_options};
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -338,7 +339,11 @@ bun install
     fn lockfile_validation_uses_tracked_files_not_filesystem_presence() {
         let root = temp_repo("untracked-lockfile");
         fs::create_dir(root.join(".git")).unwrap();
-        fs::write(root.join("package.json"), r#"{"scripts": {}}"#).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"dependencies": {"example": "1.0.0"}}"#,
+        )
+        .unwrap();
         fs::write(root.join("package-lock.json"), "{}").unwrap();
         fs::write(
             root.join(".git/index"),
@@ -513,7 +518,7 @@ bun install
         fs::write(root.join("packages/app/package.json"), r#"{"name": "app"}"#).unwrap();
         fs::write(
             root.join("unrelated/package.json"),
-            r#"{"name": "unrelated"}"#,
+            r#"{"dependencies": {"example": "1.0.0"}}"#,
         )
         .unwrap();
         fs::write(
@@ -537,8 +542,8 @@ bun install
 
     #[test]
     fn workspace_member_without_root_lockfile_still_warns() {
-        // Mirrors Cargo semantics: with no tracked root lockfile, both the member
-        // (listing the root lockfile candidates) and the root manifest warn.
+        // The workspace root needs a lockfile even when its member does not declare
+        // dependencies of its own.
         let root = temp_repo("workspace-no-root-lockfile");
         fs::create_dir(root.join(".git")).unwrap();
         fs::create_dir_all(root.join("packages/app")).unwrap();
@@ -558,14 +563,40 @@ bun install
 
         fs::remove_dir_all(root).unwrap();
         assert_eq!(result.violations_found, 0);
-        assert_eq!(result.warnings_found, 2);
+        assert_eq!(result.warnings_found, 1);
     }
 
     #[test]
-    fn standalone_package_without_lockfile_still_warns() {
+    fn package_manager_only_manifest_does_not_need_a_lockfile() {
         let root = temp_repo("standalone-package");
         fs::create_dir(root.join(".git")).unwrap();
-        fs::write(root.join("package.json"), r#"{"name": "solo"}"#).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"packageManager": "pnpm@10.28.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["package.json"]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+        assert_eq!(result.warnings_found, 0);
+    }
+
+    #[test]
+    fn package_with_dependencies_without_lockfile_still_warns() {
+        let root = temp_repo("standalone-package-dependencies");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"dependencies": {"example": "1.0.0"}}"#,
+        )
+        .unwrap();
         fs::write(
             root.join(".git/index"),
             git_index_with_paths(&["package.json"]),
@@ -577,6 +608,111 @@ bun install
         fs::remove_dir_all(root).unwrap();
         assert_eq!(result.violations_found, 0);
         assert_eq!(result.warnings_found, 1);
+    }
+
+    #[test]
+    fn npm_lockfile_fetchable_artifact_without_integrity_is_rejected() {
+        let root = temp_repo("npm-lockfile-missing-integrity");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "example"}"#).unwrap();
+        fs::write(
+            root.join("package-lock.json"),
+            npm_lockfile(&[serde_json::json!({
+                "version": "1.0.0",
+                "resolved": "https://registry.npmjs.org/example/-/example-1.0.0.tgz"
+            })]),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["package.json", "package-lock.json"]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 1);
+    }
+
+    #[test]
+    fn npm_lockfile_without_source_metadata_is_rejected() {
+        let root = temp_repo("npm-lockfile-missing-metadata");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "example"}"#).unwrap();
+        fs::write(
+            root.join("package-lock.json"),
+            npm_lockfile(&vec![serde_json::json!({"version": "1.0.0"}); 10]),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["package.json", "package-lock.json"]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 1);
+    }
+
+    #[test]
+    fn npm_lockfile_legitimate_hash_omissions_are_allowed() {
+        let root = temp_repo("npm-lockfile-legitimate-omissions");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "example"}"#).unwrap();
+        fs::write(
+            root.join("package-lock.json"),
+            npm_lockfile(&[
+                serde_json::json!({"version": "1.0.0", "resolved": "git+https://github.com/example/repo.git#abc"}),
+                serde_json::json!({"version": "1.0.0", "resolved": "https://github.com/example/repo.git#abc"}),
+                serde_json::json!({"version": "1.0.0", "resolved": "file:../local"}),
+                serde_json::json!({"resolved": "../workspace", "link": true}),
+                serde_json::json!({"version": "1.0.0", "inBundle": true}),
+            ]),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["package.json", "package-lock.json"]),
+        )
+        .unwrap();
+
+        let result = crate::lint_files(&root);
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
+    }
+
+    #[test]
+    fn npm_lockfile_integrity_check_can_be_skipped() {
+        let root = temp_repo("npm-lockfile-skip-integrity");
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "example"}"#).unwrap();
+        fs::write(
+            root.join("package-lock.json"),
+            npm_lockfile(&[serde_json::json!({
+                "version": "1.0.0",
+                "resolved": "https://registry.npmjs.org/example/-/example-1.0.0.tgz"
+            })]),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".git/index"),
+            git_index_with_paths(&["package.json", "package-lock.json"]),
+        )
+        .unwrap();
+
+        let result = lint_files_with_options(
+            &root,
+            LintOptions {
+                check_npm_integrity: false,
+            },
+        );
+
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.violations_found, 0);
     }
 
     #[test]
@@ -613,6 +749,17 @@ bun install
         let path = std::env::temp_dir().join(format!("locked-in-{name}-{nonce}"));
         fs::create_dir(&path).unwrap();
         path
+    }
+
+    fn npm_lockfile(package_records: &[serde_json::Value]) -> String {
+        let mut packages = serde_json::Map::new();
+        packages.insert(String::new(), serde_json::json!({"name": "example"}));
+
+        for (index, package) in package_records.iter().enumerate() {
+            packages.insert(format!("node_modules/package-{index}"), package.clone());
+        }
+
+        serde_json::json!({"lockfileVersion": 3, "packages": packages}).to_string()
     }
 
     fn git_index_with_paths(paths: &[&str]) -> Vec<u8> {
@@ -710,7 +857,7 @@ bun install
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_input_fails_closed() {
+    fn symlinked_input_is_skipped() {
         use std::os::unix::fs::symlink;
 
         let root = temp_repo("symlink-input");
@@ -720,7 +867,7 @@ bun install
         let result = crate::lint_files(&root);
 
         fs::remove_dir_all(root).unwrap();
-        assert_eq!(result.violations_found, 1);
+        assert_eq!(result.violations_found, 0);
     }
 
     #[test]

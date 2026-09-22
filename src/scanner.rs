@@ -13,12 +13,27 @@ use crate::parsers::line::check_file;
 use crate::report::print_violations;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const MAX_FILES_TO_SCAN: usize = 100_000;
 const MAX_CONCURRENT_FILE_SCANS: usize = 2;
+const MIN_STRIPPED_NPM_PACKAGE_RECORDS: usize = 10;
+
+#[derive(Clone, Copy)]
+pub struct LintOptions {
+    pub check_npm_integrity: bool,
+}
+
+impl Default for LintOptions {
+    fn default() -> Self {
+        Self {
+            check_npm_integrity: true,
+        }
+    }
+}
 
 pub struct LintContext {
     pub bun_frozen_lockfile: bool,
@@ -26,7 +41,13 @@ pub struct LintContext {
     pub is_package_json: bool,
 }
 
+#[must_use]
 pub fn lint_files(root: &Path) -> LintResult {
+    lint_files_with_options(root, LintOptions::default())
+}
+
+#[must_use]
+pub fn lint_files_with_options(root: &Path, options: LintOptions) -> LintResult {
     let submodule_pruner = SubmodulePruner::new(root);
     let mut files_to_check: Vec<PathBuf> = WalkBuilder::new(root)
         .hidden(false)
@@ -41,7 +62,9 @@ pub fn lint_files(root: &Path) -> LintResult {
         .build()
         .filter_map(Result::ok)
         .map(ignore::DirEntry::into_path)
-        .filter(|path| path.is_file() && should_check_file(path))
+        // Symlink targets are intentionally not scanner inputs. Bounded I/O
+        // still rejects them for callers that explicitly attempt to read one.
+        .filter(|path| !path.is_symlink() && path.is_file() && should_check_file(path))
         .take(MAX_FILES_TO_SCAN.saturating_add(1))
         .collect();
     let file_limit_exceeded = files_to_check.len() > MAX_FILES_TO_SCAN;
@@ -70,7 +93,7 @@ pub fn lint_files(root: &Path) -> LintResult {
         });
     }
 
-    checked_results.extend(check_tracked_lockfiles(root));
+    checked_results.extend(check_tracked_lockfiles(root, options));
 
     checked_results.sort_by(|a, b| a.path.cmp(&b.path));
 
@@ -141,7 +164,7 @@ fn lint_file(
     })
 }
 
-fn check_tracked_lockfiles(root: &Path) -> Vec<FileLintResult> {
+fn check_tracked_lockfiles(root: &Path, options: LintOptions) -> Vec<FileLintResult> {
     let tracked = match tracked_paths(root) {
         Ok(paths) => paths,
         Err(status) => {
@@ -190,16 +213,195 @@ fn check_tracked_lockfiles(root: &Path) -> Vec<FileLintResult> {
         });
     }
 
+    if options.check_npm_integrity {
+        results.extend(check_npm_lockfile_integrity(root, &tracked_set));
+    }
+
     results
 }
 
-fn manifest_needs_lockfile(root: &Path, manifest: &Path, ecosystem: Ecosystem) -> bool {
-    if ecosystem != Ecosystem::Go {
-        return true;
+fn check_npm_lockfile_integrity(root: &Path, tracked: &HashSet<PathBuf>) -> Vec<FileLintResult> {
+    tracked
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "package-lock.json" || name == "npm-shrinkwrap.json")
+        })
+        .filter_map(|path| {
+            let lockfile = root.join(path);
+            let content = read_bounded_utf8(&lockfile, MAX_CONFIG_FILE_SIZE, true).ok()?;
+            let stats = npm_lockfile_integrity_stats(&content)?;
+
+            let message = if stats.fetchable_without_integrity > 0 {
+                format!(
+                    "npm lockfile has {} fetched package artifact(s) without integrity hashes; regenerate it after removing node_modules",
+                    stats.fetchable_without_integrity
+                )
+            } else if stats.candidates >= MIN_STRIPPED_NPM_PACKAGE_RECORDS
+                && stats.without_source_metadata == stats.candidates
+            {
+                format!(
+                    "npm lockfile lacks source metadata: all {} likely registry package records lack both resolved URLs and integrity hashes; regenerate it after removing node_modules",
+                    stats.candidates
+                )
+            } else {
+                return None;
+            };
+
+            Some(FileLintResult {
+                path: lockfile,
+                violations: vec![Violation::error(
+                    0,
+                    message,
+                    path.to_string_lossy(),
+                    "npm-lockfile-missing-integrity",
+                )],
+            })
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct NpmIntegrityStats {
+    candidates: usize,
+    fetchable_without_integrity: usize,
+    without_source_metadata: usize,
+}
+
+fn npm_lockfile_integrity_stats(content: &str) -> Option<NpmIntegrityStats> {
+    let lockfile: Value = serde_json::from_str(content).ok()?;
+    let object = lockfile.as_object()?;
+
+    if let Some(packages) = object.get("packages").and_then(Value::as_object) {
+        let mut stats = NpmIntegrityStats::default();
+        for (path, package) in packages {
+            if path.is_empty() || !path.split('/').any(|component| component == "node_modules") {
+                continue;
+            }
+            add_package_integrity_stat(package, &mut stats);
+        }
+        return Some(stats);
     }
 
-    read_bounded_utf8(&root.join(manifest), MAX_CONFIG_FILE_SIZE, true)
-        .map_or(true, |content| go_mod_has_module_and_require(&content))
+    let mut stats = NpmIntegrityStats::default();
+    collect_v1_package_integrity_stats(object.get("dependencies")?, &mut stats);
+    Some(stats)
+}
+
+fn collect_v1_package_integrity_stats(packages: &Value, stats: &mut NpmIntegrityStats) {
+    let Some(packages) = packages.as_object() else {
+        return;
+    };
+
+    for package in packages.values() {
+        add_package_integrity_stat(package, stats);
+        if let Some(dependencies) = package.get("dependencies") {
+            collect_v1_package_integrity_stats(dependencies, stats);
+        }
+    }
+}
+
+fn add_package_integrity_stat(package: &Value, stats: &mut NpmIntegrityStats) {
+    if !package.is_object() {
+        return;
+    }
+
+    if package.get("link").and_then(Value::as_bool) == Some(true)
+        || package.get("inBundle").and_then(Value::as_bool) == Some(true)
+        || package.get("bundled").and_then(Value::as_bool) == Some(true)
+    {
+        return;
+    }
+
+    let has_integrity = package
+        .get("integrity")
+        .and_then(Value::as_str)
+        .is_some_and(|integrity| !integrity.is_empty());
+    let resolved = package
+        .get("resolved")
+        .and_then(Value::as_str)
+        .filter(|resolved| !resolved.is_empty());
+
+    if resolved.is_some_and(is_non_artifact_source) {
+        return;
+    }
+
+    if resolved.is_some_and(is_fetchable_artifact) {
+        stats.candidates = stats.candidates.saturating_add(1);
+        if !has_integrity {
+            stats.fetchable_without_integrity = stats.fetchable_without_integrity.saturating_add(1);
+        }
+    } else if has_integrity {
+        stats.candidates = stats.candidates.saturating_add(1);
+    } else if resolved.is_none() && package_version_looks_registry_based(package) {
+        stats.candidates = stats.candidates.saturating_add(1);
+        stats.without_source_metadata = stats.without_source_metadata.saturating_add(1);
+    }
+}
+
+fn is_fetchable_artifact(resolved: &str) -> bool {
+    let resolved = resolved.to_ascii_lowercase();
+    resolved.starts_with("https://")
+        || resolved.starts_with("http://")
+        || resolved.starts_with("registry.npmjs.org/")
+}
+
+fn is_non_artifact_source(resolved: &str) -> bool {
+    let resolved = resolved.to_ascii_lowercase();
+    resolved.starts_with("file:")
+        || resolved.starts_with("link:")
+        || resolved.starts_with("workspace:")
+        || resolved.starts_with("git")
+        || resolved.starts_with("ssh:")
+        || resolved.starts_with("github:")
+        || resolved.starts_with("gitlab:")
+        || resolved.starts_with("bitbucket:")
+        || resolved.starts_with("git@")
+        || resolved.contains(".git#")
+        || resolved.starts_with("./")
+        || resolved.starts_with("../")
+        || resolved.starts_with('/')
+}
+
+fn package_version_looks_registry_based(package: &Value) -> bool {
+    package
+        .get("version")
+        .and_then(Value::as_str)
+        .is_some_and(|version| {
+            version.starts_with("npm:")
+                || version.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        })
+}
+
+fn manifest_needs_lockfile(root: &Path, manifest: &Path, ecosystem: Ecosystem) -> bool {
+    match ecosystem {
+        Ecosystem::JavaScript => javascript_manifest_needs_lockfile(root, manifest),
+        Ecosystem::Rust => true,
+        Ecosystem::Go => read_bounded_utf8(&root.join(manifest), MAX_CONFIG_FILE_SIZE, true)
+            .map_or(true, |content| go_mod_has_module_and_require(&content)),
+    }
+}
+
+fn javascript_manifest_needs_lockfile(root: &Path, manifest: &Path) -> bool {
+    read_bounded_utf8(&root.join(manifest), MAX_CONFIG_FILE_SIZE, true).map_or(true, |content| {
+        let Ok(manifest) = serde_json::from_str::<Value>(&content) else {
+            return true;
+        };
+        let Some(manifest) = manifest.as_object() else {
+            return true;
+        };
+
+        manifest.contains_key("workspaces")
+            || ["dependencies", "devDependencies", "optionalDependencies"]
+                .iter()
+                .any(|key| {
+                    manifest.get(*key).is_some_and(|dependencies| {
+                        dependencies
+                            .as_object()
+                            .is_none_or(|dependencies| !dependencies.is_empty())
+                    })
+                })
+    })
 }
 
 fn go_mod_has_module_and_require(content: &str) -> bool {

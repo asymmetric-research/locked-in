@@ -1,11 +1,12 @@
 [package]
 name = "locked-in"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 
 [dependencies]
 regex = "1.10"
 colored = "2.1"
+clap = { version = "4.5", features = ["derive"] }
 ignore = "0.4"
 rayon = "1.10"
 serde_json = "1.0"

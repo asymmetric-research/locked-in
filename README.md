@@ -60,6 +60,7 @@ The comment syntax is extension-aware: `#` for shell, YAML, Makefile, and Docker
 | `yarn-version-pin` | `yarn add` without `@version` |
 | `bun-frozen-lockfile` | `bun install` without `--frozen-lockfile` or config |
 | `bun-version-pin` | `bun add` without `@version` |
+| `npm-lockfile-missing-integrity` | fetched npm artifacts lack integrity hashes or source metadata |
 | `missing-tracked-lockfile` | warning for tracked manifest without a tracked lockfile |
 | `git-metadata-unavailable` | warning when git metadata is unavailable for tracked lockfile validation |
 | `scan-input-unavailable` | input could not be safely read within scanner limits |
@@ -69,6 +70,8 @@ The comment syntax is extension-aware: `#` for shell, YAML, Makefile, and Docker
 ## Tracked Lockfiles
 
 `locked-in` reads `.git/index` to verify tracked manifests have tracked lockfiles. A lockfile that exists only in the working tree does not satisfy this rule; it must be checked into git. Missing tracked lockfiles are warnings and do not fail the run.
+
+For tracked `package-lock.json` and `npm-shrinkwrap.json` files, it requires integrity hashes for packages resolved from registry or remote tarball URLs. Git, local, workspace link, and bundled package records are excluded because they may legitimately omit hashes. It also detects the likely-corrupt regeneration pattern where at least ten likely registry package records have all lost both their `resolved` URLs and `integrity` hashes. Use `--skip-npm-integrity-check` to suppress this check.
 
 Supported manifest pairs:
 
@@ -94,7 +97,7 @@ If git metadata is unavailable, tracked lockfile validation is skipped with a wa
 
 Scanning respects `.gitignore` and skips common generated/vendor directories such as `node_modules`, `target`, `dist`, `build`, `coverage`, `vendor`, `.next`, `.nuxt`, `.turbo`, and `.cache`.
 
-To keep scans reliable on untrusted repositories, `locked-in` rejects symbolic-link inputs and limits scanned source files to 16 MiB, configuration and `package.json` files to 2 MiB, the Git index to 64 MiB and 100,000 entries, repositories to 100,000 relevant files, concurrent file parsing to two files, and retained findings to 1,000 per file. Files that cannot be read safely are reported as errors rather than silently skipped.
+To keep scans reliable on untrusted repositories, `locked-in` skips symbolic-link inputs and limits scanned source files to 16 MiB, configuration and `package.json` files to 2 MiB, the Git index to 64 MiB and 100,000 entries, repositories to 100,000 relevant files, concurrent file parsing to two files, and retained findings to 1,000 per file. Regular files that cannot be read safely are reported as errors rather than silently skipped.
 
 ## Usage
 

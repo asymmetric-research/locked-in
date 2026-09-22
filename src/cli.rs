@@ -1,45 +1,45 @@
-use crate::lint_files;
+use crate::scanner::{LintOptions, lint_files_with_options};
+use clap::Parser;
 use colored::Colorize;
 use std::path::PathBuf;
 
-const USAGE: &str = "Usage: locked-in [PATH]\n\nLints package-manager commands for lockfile and version-pin safety.\n\nArguments:\n  PATH        Repository path to scan (default: current directory)\n\nOptions:\n  -h, --help     Show this help text\n  -V, --version  Show version\n";
+#[derive(Debug, Parser)]
+#[command(
+    about = "Lints package-manager commands for lockfile and version-pin safety.",
+    version
+)]
+struct Cli {
+    /// Repository path to scan.
+    #[arg(value_name = "PATH")]
+    root: Option<PathBuf>,
+
+    /// Do not validate npm lockfile integrity metadata.
+    #[arg(long)]
+    skip_npm_integrity_check: bool,
+}
 
 pub fn run<I, S>(args: I) -> i32
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    let mut args = args.into_iter().map(Into::into);
-    let _program = args.next();
-    let mut root: Option<PathBuf> = None;
-
-    for arg in args {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                print!("{USAGE}");
-                return 0;
-            }
-            "-V" | "--version" => {
-                println!("locked-in {}", env!("CARGO_PKG_VERSION"));
-                return 0;
-            }
-            _ if arg.starts_with('-') => {
-                eprintln!("Unknown option: {arg}\n\n{USAGE}");
-                return 2;
-            }
-            _ if root.is_some() => {
-                eprintln!("Unexpected extra argument: {arg}\n\n{USAGE}");
-                return 2;
-            }
-            _ => root = Some(PathBuf::from(arg)),
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let exit_code = error.exit_code();
+            let _ = error.print();
+            return exit_code;
         }
-    }
-
-    let root = root.unwrap_or_else(|| PathBuf::from("."));
+    };
+    let root = cli.root.unwrap_or_else(|| PathBuf::from("."));
+    let options = LintOptions {
+        check_npm_integrity: !cli.skip_npm_integrity_check,
+    };
 
     println!("{}", "Checking for package manager violations...\n".blue());
 
-    let result = lint_files(&root);
+    let result = lint_files_with_options(&root, options);
 
     println!();
     println!("{}", "═══════════════════════════════════════".blue());
@@ -77,7 +77,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::run;
+    use super::{Cli, run};
+    use clap::Parser;
 
     #[test]
     fn help_exits_without_scanning() {
@@ -92,5 +93,12 @@ mod tests {
     #[test]
     fn unknown_option_returns_usage_error() {
         assert_eq!(run(["locked-in", "--json"]), 2);
+    }
+
+    #[test]
+    fn skip_npm_integrity_check_is_parsed() {
+        let cli = Cli::try_parse_from(["locked-in", "--skip-npm-integrity-check"]).unwrap();
+
+        assert!(cli.skip_npm_integrity_check);
     }
 }
