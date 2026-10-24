@@ -1,4 +1,4 @@
-FROM rust:1.91 as builder
+FROM rust:1.99-trixie AS builder
 
 WORKDIR /app
 
@@ -18,7 +18,7 @@ COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && \
     apt-get install -y ca-certificates && \
